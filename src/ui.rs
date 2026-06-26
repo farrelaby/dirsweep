@@ -95,7 +95,7 @@ fn render_main(state: &mut AppState, frame: &mut Frame, area: Rect) {
             render_browsing(state, frame, area);
             render_confirm_dialog(state, frame, area);
         }
-        AppPhase::Deleting => render_deleting(frame, area),
+        AppPhase::Deleting => render_deleting(state, frame, area),
         AppPhase::ConfirmQuit => {
             render_browsing(state, frame, area);
             render_confirm_quit_dialog(state, frame, area);
@@ -448,12 +448,37 @@ fn render_confirm_quit_dialog(_state: &AppState, frame: &mut Frame, area: Rect) 
     frame.render_widget(dialog, dialog_area);
 }
 
-fn render_deleting(frame: &mut Frame, area: Rect) {
-    let text = Paragraph::new(" Deleting...")
-        .style(Style::default().fg(palette::DELETING))
-        .block(Block::default());
+fn render_deleting(state: &AppState, frame: &mut Frame, area: Rect) {
+    let current = state
+        .deleting_paths
+        .get(state.deleting_index)
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
 
-    frame.render_widget(text, area);
+    let progress = format!("{}/{}", state.deleting_index + 1, state.deleting_paths.len());
+
+    let text = Text::from(vec![
+        Line::from(Span::styled(
+            " Deleting...",
+            Style::default()
+                .fg(palette::DELETING)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("  {}", current),
+            Style::default().fg(palette::DIALOG_TEXT),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("  {} complete", progress),
+            Style::default().fg(palette::TIME),
+        )),
+    ]);
+
+    let block = Paragraph::new(text).block(Block::default());
+    frame.render_widget(block, area);
 }
 
 fn render_status_bar(state: &AppState, frame: &mut Frame, area: Rect) {

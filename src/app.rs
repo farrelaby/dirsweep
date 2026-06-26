@@ -103,6 +103,9 @@ pub struct AppState {
     pub sizes_complete: bool,
     pub ordered_by: OrderBy,
     pub order_cursor: OrderBy,
+    pub deleting_paths: Vec<PathBuf>,
+    pub deleting_index: usize,
+    pub deleting_failed: Vec<PathBuf>,
     target_index: HashMap<PathBuf, usize>,
 }
 
@@ -127,6 +130,9 @@ impl AppState {
             sizes_complete: false,
             ordered_by: OrderBy::NameAsc,
             order_cursor: OrderBy::NameAsc,
+            deleting_paths: Vec::new(),
+            deleting_index: 0,
+            deleting_failed: Vec::new(),
             target_index: HashMap::new(),
         }
     }

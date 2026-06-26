@@ -139,6 +139,56 @@ fn run_app(
 
         terminal.draw(|f| sweep::ui::render(state, f))?;
 
+        if state.phase == AppPhase::Deleting && state.deleting_index < state.deleting_paths.len() {
+            let path = state.deleting_paths[state.deleting_index].clone();
+
+            let ok = match state.delete_preference {
+                DeletePreference::Trash => trash::delete(&path).is_ok(),
+                DeletePreference::Permanent => std::fs::remove_dir_all(&path).is_ok(),
+                DeletePreference::DryRun => true,
+            };
+
+            state.deleting_index += 1;
+
+            if !ok {
+                state.deleting_failed.push(path);
+            }
+
+            if state.deleting_index == state.deleting_paths.len() {
+                let count = state.deleting_paths.len() - state.deleting_failed.len();
+                let total_size = state.total_selected_size;
+                let size_str = humansize::format_size(total_size, humansize::BINARY);
+
+                for failed in &state.deleting_failed {
+                    state.selected.remove(failed);
+                }
+
+                state.accumulate_deletion(count, total_size);
+
+                state.delete_result_summary = Some(if state.deleting_failed.is_empty() {
+                    format!(
+                        "Done! {} directory(ies) deleted, {} reclaimed",
+                        state.deleting_paths.len(),
+                        size_str
+                    )
+                } else {
+                    format!(
+                        "Done! {} deleted, {} failed, {} reclaimed",
+                        count,
+                        state.deleting_failed.len(),
+                        size_str
+                    )
+                });
+
+                state.remove_deleted_from_tree();
+                state.deleting_paths.clear();
+                state.deleting_failed.clear();
+                state.phase = AppPhase::Browsing;
+            }
+
+            continue;
+        }
+
         let timeout = Duration::from_millis(50);
         if !event::poll(timeout)? {
             continue;
@@ -246,56 +296,10 @@ fn handle_confirm_key(code: KeyCode, state: &mut AppState) -> io::Result<()> {
             };
         }
         KeyCode::Enter => {
-            let paths: Vec<std::path::PathBuf> = state.selected.iter().cloned().collect();
-            let count = paths.len();
-            let mut deleted = 0usize;
-            let mut failed: Vec<std::path::PathBuf> = Vec::new();
-
+            state.deleting_paths = state.selected.iter().cloned().collect();
+            state.deleting_index = 0;
+            state.deleting_failed = Vec::new();
             state.phase = AppPhase::Deleting;
-
-            for path in &paths {
-                match state.delete_preference {
-                    DeletePreference::Trash => {
-                        if trash::delete(path).is_err() {
-                            failed.push(path.clone());
-                        } else {
-                            deleted += 1;
-                        }
-                    }
-                    DeletePreference::Permanent => {
-                        if std::fs::remove_dir_all(path).is_err() {
-                            failed.push(path.clone());
-                        } else {
-                            deleted += 1;
-                        }
-                    }
-                    DeletePreference::DryRun => {
-                        deleted += 1;
-                    }
-                }
-            }
-
-            let total_size = state.total_selected_size;
-            let size_str = humansize::format_size(total_size, humansize::BINARY);
-
-            state.accumulate_deletion(deleted, total_size);
-
-            state.delete_result_summary = Some(if failed.is_empty() {
-                format!(
-                    "Done! {} directory(ies) deleted, {} reclaimed",
-                    count, size_str
-                )
-            } else {
-                format!(
-                    "Done! {} deleted, {} failed, {} reclaimed",
-                    deleted,
-                    failed.len(),
-                    size_str
-                )
-            });
-
-            state.remove_deleted_from_tree();
-            state.phase = AppPhase::Browsing;
         }
         _ => {}
     }
