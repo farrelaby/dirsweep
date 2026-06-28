@@ -2,7 +2,7 @@
 
 ## Overview
 
-`sweep` is a TUI tool for finding and removing bloated project directories. It scans a target directory, identifies dependency/build folders, and presents them in an interactive interface for bulk deletion.
+`dirsweep` is a TUI tool for finding and removing bloated project directories. It scans a target directory, identifies dependency/build folders, and presents them in an interactive interface for bulk deletion.
 
 ## Project structure
 
@@ -241,4 +241,4 @@ pub const KNOWN_TARGETS: &[&str] = &[
 
 ### Future
 
-User-defined targets via a config file (e.g. `~/.config/sweep/targets.toml`).
+User-defined targets via a config file (e.g. `~/.config/dirsweep/targets.toml`).

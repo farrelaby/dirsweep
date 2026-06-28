@@ -29,14 +29,14 @@ fn test_scan_finds_multiple_targets() {
     create_dir(&app2.join("target"));
     create_file(&app2.join("target/debug/app"), 8192);
 
-    let output = sweep::scanner::scan(dir.path());
+    let output = dirsweep::scanner::scan(dir.path());
 
     assert_eq!(output.target_dirs.len(), 3, "should find 3 target dirs");
     assert_eq!(output.projects.len(), 2, "should find 2 projects");
 
     // Fast scan returns size=0; verify sizes via scan_target_size
     for dir in &output.target_dirs {
-        let (size, _) = sweep::scanner::scan_target_size(&dir.path).unwrap();
+        let (size, _) = dirsweep::scanner::scan_target_size(&dir.path).unwrap();
         assert!(size > 0, "target {:?} should have non-zero size", dir.path);
     }
 }
@@ -45,7 +45,7 @@ fn test_scan_finds_multiple_targets() {
 fn test_scan_empty_directory() {
     let dir = tempfile::tempdir().expect("failed to create temp dir");
 
-    let output = sweep::scanner::scan(dir.path());
+    let output = dirsweep::scanner::scan(dir.path());
 
     assert!(output.target_dirs.is_empty(), "no targets in empty dir");
     assert!(output.projects.is_empty(), "no projects in empty dir");
@@ -58,7 +58,7 @@ fn test_scan_ignores_dot_git() {
     create_dir(&dir.path().join(".git"));
     create_file(&dir.path().join(".git/objects/pack/pack.pack"), 100000);
 
-    let output = sweep::scanner::scan(dir.path());
+    let output = dirsweep::scanner::scan(dir.path());
 
     assert!(output.target_dirs.is_empty());
 }
@@ -69,7 +69,7 @@ fn test_scan_single_project_without_lockfile() {
     create_dir(&dir.path().join("node_modules"));
     create_file(&dir.path().join("node_modules/pkg/index.js"), 500);
 
-    let output = sweep::scanner::scan(dir.path());
+    let output = dirsweep::scanner::scan(dir.path());
 
     // node_modules without a lock file should still be found
     assert_eq!(output.target_dirs.len(), 1, "should find node_modules even without lock file");
@@ -103,7 +103,7 @@ fn test_mock_multi_project_scan() {
     create_dir(&dir.path().join("standalone/venv"));
     create_file(&dir.path().join("standalone/venv/bin/python"), 100_000);
 
-    let output = sweep::scanner::scan(dir.path());
+    let output = dirsweep::scanner::scan(dir.path());
 
     assert_eq!(
         output.target_dirs.len(),
@@ -136,7 +136,7 @@ fn test_mock_multi_project_scan() {
 
     // Verify sizes via scan_target_size (fast scan returns size=0)
     let total: u64 = output.target_dirs.iter().map(|d| {
-        let (size, _) = sweep::scanner::scan_target_size(&d.path).unwrap();
+        let (size, _) = dirsweep::scanner::scan_target_size(&d.path).unwrap();
         size
     }).sum();
     assert_eq!(total, 24_300_000, "total size should be sum of all files");
@@ -152,8 +152,8 @@ fn test_mock_tree_building() {
     create_dir(&dir.path().join("app/.next"));
     create_file(&dir.path().join("app/.next/build.json"), 500_000);
 
-    let output = sweep::scanner::scan(dir.path());
-    let mut state = sweep::app::AppState::new(dir.path().to_path_buf());
+    let output = dirsweep::scanner::scan(dir.path());
+    let mut state = dirsweep::app::AppState::new(dir.path().to_path_buf());
     state.build_tree(output);
 
     // Tree should have: ProjectHeader + 2 TargetDirs = 3 entries
@@ -161,23 +161,23 @@ fn test_mock_tree_building() {
 
     let header = &state.tree[0];
     assert!(
-        matches!(header, sweep::app::TreeEntry::ProjectHeader { name, .. } if name == "app"),
+        matches!(header, dirsweep::app::TreeEntry::ProjectHeader { name, .. } if name == "app"),
         "first entry should be 'app' header, got {header:?}"
     );
 
     // Check that exactly 2 TargetDir entries exist for node_modules and .next
     let target_count = state.tree.iter().filter(|e| {
-        matches!(e, sweep::app::TreeEntry::TargetDir { .. })
+        matches!(e, dirsweep::app::TreeEntry::TargetDir { .. })
     }).count();
     assert_eq!(target_count, 2, "should have 2 target dirs");
 
     let has_node_modules = state.tree.iter().any(|e| {
-        matches!(e, sweep::app::TreeEntry::TargetDir { path, .. } if path.file_name() == Some(std::ffi::OsStr::new("node_modules")))
+        matches!(e, dirsweep::app::TreeEntry::TargetDir { path, .. } if path.file_name() == Some(std::ffi::OsStr::new("node_modules")))
     });
     assert!(has_node_modules, "tree should contain node_modules");
 
     let has_dot_next = state.tree.iter().any(|e| {
-        matches!(e, sweep::app::TreeEntry::TargetDir { path, .. } if path.file_name() == Some(std::ffi::OsStr::new(".next")))
+        matches!(e, dirsweep::app::TreeEntry::TargetDir { path, .. } if path.file_name() == Some(std::ffi::OsStr::new(".next")))
     });
     assert!(has_dot_next, "tree should contain .next");
 }
@@ -192,13 +192,13 @@ fn test_mock_select_and_deselect() {
     create_dir(&dir.path().join("app/dist"));
     create_file(&dir.path().join("app/dist/bundle.js"), 1_000_000);
 
-    let output = sweep::scanner::scan(dir.path());
-    let mut state = sweep::app::AppState::new(dir.path().to_path_buf());
+    let output = dirsweep::scanner::scan(dir.path());
+    let mut state = dirsweep::app::AppState::new(dir.path().to_path_buf());
     state.build_tree(output);
 
     // Find indices of target dirs in the tree
     let indices: Vec<usize> = state.tree.iter().enumerate()
-        .filter(|(_, e)| matches!(e, sweep::app::TreeEntry::TargetDir { .. }))
+        .filter(|(_, e)| matches!(e, dirsweep::app::TreeEntry::TargetDir { .. }))
         .map(|(i, _)| i)
         .collect();
     assert_eq!(indices.len(), 2, "should find 2 target dirs");

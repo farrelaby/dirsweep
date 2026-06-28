@@ -1,10 +1,10 @@
-# sweep
+# dirsweep
 
 A TUI tool for finding and removing bloated project directories that waste disk space.
 
 ## What it does
 
-`sweep` scans directories for large project dependency/build folders and presents them in an interactive TUI where you can:
+`dirsweep` scans directories for large project dependency/build folders and presents them in an interactive TUI where you can:
 
 - See exactly how much space each directory consumes
 - Check when each directory was last modified
@@ -29,7 +29,7 @@ A TUI tool for finding and removing bloated project directories that waste disk 
 
 ### Lock file detection
 
-`sweep` detects the language/package manager by scanning for lock files and manifests in the parent directory:
+`dirsweep` detects the language/package manager by scanning for lock files and manifests in the parent directory:
 
 | Lock file | Package manager |
 |-----------|----------------|
@@ -45,7 +45,7 @@ A TUI tool for finding and removing bloated project directories that waste disk 
 
 ### Monorepo detection
 
-`sweep` identifies monorepo structures to help you understand what you're deleting:
+`dirsweep` identifies monorepo structures to help you understand what you're deleting:
 
 | File | Monorepo tool |
 |------|--------------|
@@ -61,7 +61,7 @@ Root-level `node_modules` in monorepos are highlighted as they may be shared acr
 ## TUI preview
 
 ```
- sweep — /home/user/projects  |  6.8 GiB reclaimable  |  scan 0.6s
+ dirsweep — /home/user/projects  |  6.8 GiB reclaimable  |  scan 0.6s
 
    my-app (pnpm)
  ▶ └ [●] node_modules    1.2 GiB   3 days ago
@@ -78,20 +78,26 @@ Root-level `node_modules` in monorepos are highlighted as they may be shared acr
 
 ```bash
 # Scan current directory
-sweep
+dirsweep
 
 # Scan a specific directory
-sweep --dir /path/to/projects
+dirsweep --dir /path/to/projects
 ```
 
 ## Installation
 
-```bash
-cargo install sweep
-```
-
-Or via npm (coming soon):
+Choose your method:
 
 ```bash
-npx sweep
+# via cargo (if you have Rust installed)
+cargo install dirsweep
+
+# via npm/pnpm (no Rust needed)
+npx dirsweep
+
+# via shell script (Linux/macOS)
+curl -sSfL https://github.com/farrelaby/dirsweep/raw/main/install.sh | sh
+
+# via Docker (interactive TUI requires -it)
+docker run -it ghcr.io/farrelaby/dirsweep [--dir /path]
 ```

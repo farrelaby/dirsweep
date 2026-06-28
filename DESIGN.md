@@ -4,7 +4,7 @@
 
 ```
 ┌───────────────────────────────────────────────────────────┐
-│  sweep — scanning /path/to/projects         Ctrl+C quit   │
+│  dirsweep — scanning /path/to/projects      Ctrl+C quit   │
 ├───────────────────────────────────────────────────────────┤
 │                                                           │
 │  Project                         Size      Modified       │
@@ -95,7 +95,7 @@ When a parent project has some children selected and others not, the parent row 
 ### 1. Scanning
 
 ```
-sweep — scanning /home/projects
+dirsweep — scanning /home/projects
 ────────────────────────────────
   Scanning...  Found 12 directories ████████░░ 85%
 ```

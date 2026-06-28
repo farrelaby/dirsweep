@@ -13,7 +13,7 @@ use crossterm::{
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 
-use sweep::app::{AppPhase, AppState, DeletePreference, TreeEntry};
+use dirsweep::app::{AppPhase, AppState, DeletePreference, TreeEntry};
 
 enum SizeUpdate {
     Update {
@@ -26,7 +26,7 @@ enum SizeUpdate {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "sweep", about = "Find and remove bloated project directories")]
+#[command(name = "dirsweep", about = "Find and remove bloated project directories")]
 struct Cli {
     #[arg(short, long, default_value = ".")]
     dir: PathBuf,
@@ -69,9 +69,9 @@ fn run_app(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     state: &mut AppState,
 ) -> io::Result<()> {
-    terminal.draw(|f| sweep::ui::render(state, f))?;
+    terminal.draw(|f| dirsweep::ui::render(state, f))?;
     let start = Instant::now();
-    let output = sweep::scanner::scan(&state.scan_path);
+    let output = dirsweep::scanner::scan(&state.scan_path);
     state.scan_duration_ms = start.elapsed().as_millis() as u64;
     state.build_tree(output);
     state.phase = AppPhase::Browsing;
@@ -92,7 +92,7 @@ fn run_app(
 
     thread::spawn(move || {
         for path in target_paths {
-            match sweep::scanner::scan_target_size(&path) {
+            match dirsweep::scanner::scan_target_size(&path) {
                 Ok((size, last_modified)) => {
                     let _ = tx.send(SizeUpdate::Update { path, size, last_modified, error: None });
                 }
@@ -137,7 +137,7 @@ fn run_app(
             }
         }
 
-        terminal.draw(|f| sweep::ui::render(state, f))?;
+        terminal.draw(|f| dirsweep::ui::render(state, f))?;
 
         if state.phase == AppPhase::Deleting && state.deleting_index < state.deleting_paths.len() {
             let path = state.deleting_paths[state.deleting_index].clone();

@@ -1,7 +1,15 @@
 [package]
-name = "sweep"
+name = "dirsweep"
 version = "0.1.0"
 edition = "2024"
+description = "A TUI tool for finding and removing bloated project directories"
+keywords = ["tui", "disk-cleanup", "node_modules", "developer-tools", "ratatui"]
+categories = ["command-line-utilities", "development-tools"]
+repository = "https://github.com/farrelaby/dirsweep"
+homepage = "https://github.com/farrelaby/dirsweep"
+license = "MIT"
+readme = "README.md"
+authors = ["farrelaby"]
 
 [dependencies]
 chrono = "0.4.45"

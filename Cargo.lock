@@ -426,6 +426,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dirsweep"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "clap",
+ "crossterm",
+ "humansize",
+ "ratatui",
+ "tempfile",
+ "trash",
+ "walkdir",
+]
+
+[[package]]
 name = "document-features"
 version = "0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1477,20 +1491,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.118",
-]
-
-[[package]]
-name = "sweep"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "clap",
- "crossterm",
- "humansize",
- "ratatui",
- "tempfile",
- "trash",
- "walkdir",
 ]
 
 [[package]]

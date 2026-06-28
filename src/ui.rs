@@ -66,7 +66,7 @@ fn render_header(state: &AppState, frame: &mut Frame, area: Rect) {
 
     let header = Line::from(vec![
         Span::styled(
-            format!(" sweep — {}", scan_path),
+            format!(" dirsweep — {}", scan_path),
             Style::default()
                 .fg(palette::HEADER)
                 .add_modifier(Modifier::BOLD),
