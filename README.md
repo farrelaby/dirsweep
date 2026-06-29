@@ -1,15 +1,64 @@
 # dirsweep
 
-A TUI tool for finding and removing bloated project directories that waste disk space.
+A TUI tool for finding and removing bloated project directories that waste disk space. Scan projects, see exactly what's eating your disk, and delete with a single keystroke.
 
-## What it does
+## Install
 
-`dirsweep` scans directories for large project dependency/build folders and presents them in an interactive TUI where you can:
+### npm
 
-- See exactly how much space each directory consumes
-- Check when each directory was last modified
-- Toggle directories for batch removal
-- Delete with a single keystroke
+Requires Node.js or pnpm installed on your system.
+
+```bash
+# for npm user
+npx dirsweep
+```
+
+```bash
+# for pnpm user
+pnpx dirsweep
+```
+
+### cargo
+
+Requires the Rust toolchain installed via rustup.
+
+```bash
+cargo install dirsweep
+```
+
+### Shell script
+
+#### Linux
+
+```bash
+curl -sSfL https://github.com/farrelaby/dirsweep/raw/main/install.sh | sudo sh
+```
+
+#### macOS
+
+```bash
+curl -sSfL https://github.com/farrelaby/dirsweep/raw/main/install.sh | sh
+```
+
+### Windows
+
+No shell script available. Use [npm](#npm) or [cargo](#cargo).
+
+## TUI preview
+
+```
+ dirsweep — /home/user/projects  |  6.8 GiB reclaimable  |  scan 0.6s
+
+   my-app (pnpm)
+ ▶ └ [●] node_modules    1.2 GiB   3 days ago
+     [●] dist            800 MiB   2 days ago
+   rust-project (cargo)
+   └ [●] target          4.5 GiB   10 days ago
+   my-other-app (npm)
+     [ ] .next           350 MiB   just now
+
+ [Space] toggle  [a] all  [d] none  [Enter] delete  [q] quit  3 selected | 6.50 GiB | 1/6
+```
 
 ## Supported targets
 
@@ -58,22 +107,6 @@ A TUI tool for finding and removing bloated project directories that waste disk 
 
 Root-level `node_modules` in monorepos are highlighted as they may be shared across packages — deleting them could break the entire workspace.
 
-## TUI preview
-
-```
- dirsweep — /home/user/projects  |  6.8 GiB reclaimable  |  scan 0.6s
-
-   my-app (pnpm)
- ▶ └ [●] node_modules    1.2 GiB   3 days ago
-     [●] dist            800 MiB   2 days ago
-   rust-project (cargo)
-   └ [●] target          4.5 GiB   10 days ago
-   my-other-app (npm)
-     [ ] .next           350 MiB   just now
-
- [Space] toggle  [a] all  [d] none  [Enter] delete  [q] quit  3 selected | 6.50 GiB | 1/6
-```
-
 ## Usage
 
 ```bash
@@ -82,22 +115,4 @@ dirsweep
 
 # Scan a specific directory
 dirsweep --dir /path/to/projects
-```
-
-## Installation
-
-Choose your method:
-
-```bash
-# via cargo (if you have Rust installed)
-cargo install dirsweep
-
-# via npm/pnpm (no Rust needed)
-npx dirsweep
-
-# via shell script (Linux/macOS)
-curl -sSfL https://github.com/farrelaby/dirsweep/raw/main/install.sh | sh
-
-# via Docker (interactive TUI requires -it)
-docker run -it ghcr.io/farrelaby/dirsweep [--dir /path]
 ```
