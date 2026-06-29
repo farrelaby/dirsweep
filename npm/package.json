@@ -27,7 +27,8 @@
   "homepage": "https://github.com/farrelaby/dirsweep",
   "files": [
     "bin.js",
-    "install.js"
+    "install.js",
+    "README.md"
   ],
   "os": [
     "darwin",
