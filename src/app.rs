@@ -236,6 +236,12 @@ impl AppState {
             .sum();
         self.rebuild_target_index();
         self.clamp_index();
+        // Start cursor on first TargetDir
+        self.list_index = self
+            .tree
+            .iter()
+            .position(|e| matches!(e, TreeEntry::TargetDir { .. }))
+            .unwrap_or(0);
     }
 
     pub fn toggle_selection(&mut self) {
@@ -273,15 +279,25 @@ impl AppState {
         self.tree.get(self.list_index)
     }
 
+    fn is_header(&self) -> bool {
+        matches!(&self.tree[self.list_index], TreeEntry::ProjectHeader { .. })
+    }
+
     pub fn move_up(&mut self) {
-        if self.list_index > 0 {
+        if self.list_index > 1 {
             self.list_index -= 1;
+            if self.is_header() {
+                self.list_index -= 1;
+            }
         }
     }
 
     pub fn move_down(&mut self) {
         if self.list_index + 1 < self.tree.len() {
             self.list_index += 1;
+            if self.is_header() && self.list_index + 1 < self.tree.len() {
+                self.list_index += 1;
+            }
         }
     }
 
@@ -713,13 +729,17 @@ mod tests {
     fn test_move_up_down() {
         let mut state = AppState::new(PathBuf::from("/test"));
         state.build_tree(make_scan_output());
+        // Cursor starts on first TargetDir (index 1, skipping ProjectHeader at 0)
+        assert_eq!(state.list_index, 1);
 
         state.move_down();
-        assert_eq!(state.list_index, 1);
-        state.move_down();
         assert_eq!(state.list_index, 2);
+        state.move_down();
+        assert_eq!(state.list_index, 2); // already at end
         state.move_up();
         assert_eq!(state.list_index, 1);
+        state.move_up();
+        assert_eq!(state.list_index, 1); // can't go past first TargetDir
     }
 
     #[test]
@@ -797,6 +817,6 @@ mod tests {
         for _ in 0..10 {
             state.move_up();
         }
-        assert_eq!(state.list_index, 0);
+        assert_eq!(state.list_index, 1); // stays on first TargetDir
     }
 }
