@@ -202,17 +202,15 @@ fn render_browsing(state: &mut AppState, frame: &mut Frame, area: Rect) {
     let items: Vec<ListItem> = slice
         .iter()
         .map(|entry| match entry {
-            TreeEntry::ProjectHeader {
-                name,
-                package_manager,
-            } => {
-                let pm = package_manager
-                    .as_deref()
-                    .map(|s| format!(" ({})", s))
-                    .unwrap_or_default();
+            TreeEntry::ProjectHeader { name, languages } => {
+                let lang_str = if languages.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", languages.join(", "))
+                };
 
                 let text = Line::from(vec![Span::styled(
-                    format!("  {}{}", name, pm),
+                    format!("  {}{}", name, lang_str),
                     Style::default().fg(palette::PROJECT),
                 )]);
                 ListItem::new(text)

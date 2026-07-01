@@ -21,8 +21,6 @@ fn test_scan_finds_multiple_targets() {
     create_file(&app1.join("package-lock.json"), 50);
     create_dir(&app1.join("node_modules"));
     create_file(&app1.join("node_modules/pkg/index.js"), 2048);
-    create_dir(&app1.join("dist"));
-    create_file(&app1.join("dist/bundle.js"), 4096);
 
     let app2 = dir.path().join("project-b");
     create_file(&app2.join("Cargo.lock"), 50);
@@ -31,7 +29,7 @@ fn test_scan_finds_multiple_targets() {
 
     let output = dirsweep::scanner::scan(dir.path());
 
-    assert_eq!(output.target_dirs.len(), 3, "should find 3 target dirs");
+    assert_eq!(output.target_dirs.len(), 2, "should find 2 target dirs");
     assert_eq!(output.projects.len(), 2, "should find 2 projects");
 
     // Fast scan returns size=0; verify sizes via scan_target_size
@@ -71,15 +69,14 @@ fn test_scan_single_project_without_lockfile() {
 
     let output = dirsweep::scanner::scan(dir.path());
 
-    // node_modules without a lock file should still be found
-    assert_eq!(
-        output.target_dirs.len(),
-        1,
-        "should find node_modules even without lock file"
+    // No detection file means no project, and no orphans are swept
+    assert!(
+        output.target_dirs.is_empty(),
+        "no target dirs without detection file (no orphans)"
     );
     assert!(
         output.projects.is_empty(),
-        "no project detected without lock file"
+        "no project detected without detection file"
     );
 }
 
@@ -100,36 +97,30 @@ fn test_mock_multi_project_scan() {
         200_000,
     );
 
-    // project-b: yarn with node_modules + vendor
+    // project-b: yarn with node_modules
     create_file(&dir.path().join("project-b/yarn.lock"), 100);
     create_dir(&dir.path().join("project-b/node_modules"));
     create_file(
         &dir.path().join("project-b/node_modules/react/index.js"),
         5_000_000,
     );
-    create_dir(&dir.path().join("project-b/vendor"));
-    create_file(&dir.path().join("project-b/vendor/jquery.js"), 1_000_000);
 
     // project-c: cargo with target
     create_file(&dir.path().join("project-c/Cargo.lock"), 200);
     create_dir(&dir.path().join("project-c/target"));
     create_file(&dir.path().join("project-c/target/release/app"), 8_000_000);
 
-    // standalone: venv without lock file parent -> unassigned
-    create_dir(&dir.path().join("standalone/venv"));
-    create_file(&dir.path().join("standalone/venv/bin/python"), 100_000);
-
     let output = dirsweep::scanner::scan(dir.path());
 
     assert_eq!(
         output.target_dirs.len(),
-        6,
-        "should find 6 target dirs total"
+        4,
+        "should find 4 target dirs total (no vendor without detection)"
     );
     assert_eq!(
         output.projects.len(),
         3,
-        "should detect 3 projects with lock files"
+        "should detect 3 projects with detection files"
     );
     assert!(output.errors.is_empty(), "no errors expected");
 
@@ -139,27 +130,27 @@ fn test_mock_multi_project_scan() {
     assert!(project_names.contains(&"project-b"));
     assert!(project_names.contains(&"project-c"));
 
-    // Verify package managers
+    // Verify languages
     let npm_project = output
         .projects
         .iter()
         .find(|p| p.name == "project-a")
         .unwrap();
-    assert_eq!(npm_project.package_manager.as_deref(), Some("npm"));
+    assert_eq!(npm_project.languages, vec!["js"]);
 
     let yarn_project = output
         .projects
         .iter()
         .find(|p| p.name == "project-b")
         .unwrap();
-    assert_eq!(yarn_project.package_manager.as_deref(), Some("yarn"));
+    assert_eq!(yarn_project.languages, vec!["js"]);
 
     let cargo_project = output
         .projects
         .iter()
         .find(|p| p.name == "project-c")
         .unwrap();
-    assert_eq!(cargo_project.package_manager.as_deref(), Some("cargo"));
+    assert_eq!(cargo_project.languages, vec!["rust"]);
 
     // Verify children per project
     assert_eq!(
@@ -169,8 +160,8 @@ fn test_mock_multi_project_scan() {
     );
     assert_eq!(
         yarn_project.children.len(),
-        2,
-        "project-b should have 2 children"
+        1,
+        "project-b should have 1 child (vendor needs detection file)"
     );
     assert_eq!(
         cargo_project.children.len(),
@@ -187,7 +178,10 @@ fn test_mock_multi_project_scan() {
             size
         })
         .sum();
-    assert_eq!(total, 24_300_000, "total size should be sum of all files");
+    assert_eq!(
+        total, 23_200_000,
+        "total size should be sum of all files (no orphans, no vendor)"
+    );
 }
 
 #[test]
@@ -239,8 +233,6 @@ fn test_mock_select_and_deselect() {
     create_file(&dir.path().join("app/package-lock.json"), 50);
     create_dir(&dir.path().join("app/node_modules"));
     create_file(&dir.path().join("app/node_modules/pkg/index.js"), 2_000_000);
-    create_dir(&dir.path().join("app/dist"));
-    create_file(&dir.path().join("app/dist/bundle.js"), 1_000_000);
 
     let output = dirsweep::scanner::scan(dir.path());
     let mut state = dirsweep::app::AppState::new(dir.path().to_path_buf());
@@ -254,23 +246,18 @@ fn test_mock_select_and_deselect() {
         .filter(|(_, e)| matches!(e, dirsweep::app::TreeEntry::TargetDir { .. }))
         .map(|(i, _)| i)
         .collect();
-    assert_eq!(indices.len(), 2, "should find 2 target dirs");
+    assert_eq!(indices.len(), 1, "should find 1 target dir");
 
-    // Toggle first target
+    // Toggle target
     state.list_index = indices[0];
     state.toggle_selection();
     assert_eq!(state.selection_count(), 1);
 
-    // Toggle second target
-    state.list_index = indices[1];
+    // Deselect
     state.toggle_selection();
-    assert_eq!(state.selection_count(), 2);
-
-    // Deselect all
-    state.deselect_all();
     assert_eq!(state.selection_count(), 0);
 
     // Select all
     state.select_all();
-    assert_eq!(state.selection_count(), 2);
+    assert_eq!(state.selection_count(), 1);
 }

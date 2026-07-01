@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -15,7 +15,6 @@ pub struct ScannedDir {
     pub path: PathBuf,
     pub size: u64,
     pub last_modified: DateTime<Utc>,
-    pub package_manager: Option<String>,
     pub error: Option<String>,
 }
 
@@ -23,7 +22,7 @@ pub struct ScannedDir {
 pub struct ProjectInfo {
     pub path: PathBuf,
     pub name: String,
-    pub package_manager: Option<String>,
+    pub languages: Vec<String>,
     pub children: Vec<PathBuf>,
 }
 
@@ -35,10 +34,10 @@ pub struct ScanOutput {
 }
 
 pub fn scan(base_path: &Path) -> ScanOutput {
-    let mut lock_files: HashMap<PathBuf, Vec<String>> = HashMap::new();
+    let mut detection_files: HashMap<PathBuf, Vec<&str>> = HashMap::new();
     let mut errors: Vec<String> = Vec::new();
 
-    // Pass 1: Walk tree to find lock files only.
+    // Pass 1: Walk tree to find detection files.
     // filter_entry skips entering known target dirs and VCS dirs entirely.
     let walk = WalkDir::new(base_path)
         .follow_links(false)
@@ -46,7 +45,7 @@ pub fn scan(base_path: &Path) -> ScanOutput {
         .filter_entry(|e| {
             let name = e.file_name().to_string_lossy();
             !(SKIP_DIRS.contains(&name.as_ref())
-                || e.file_type().is_dir() && config::is_known_target(name.as_ref()))
+                || e.file_type().is_dir() && config::is_any_target(name.as_ref()))
         });
 
     for entry in walk {
@@ -61,20 +60,25 @@ pub fn scan(base_path: &Path) -> ScanOutput {
         let file_name = entry.file_name().to_string_lossy().to_string();
 
         if entry.file_type().is_file()
-            && let Some(pm) = config::lookup_package_manager(&file_name)
+            && let Some(lang) = config::is_detection_file(&file_name)
             && let Some(parent) = entry.path().parent()
         {
-            lock_files
+            detection_files
                 .entry(parent.to_path_buf())
                 .or_default()
-                .push(pm.to_string());
+                .push(lang);
         }
     }
 
-    // Pass 2: Build projects and find their target children via read_dir.
-    let mut projects: Vec<ProjectInfo> = lock_files
+    // Build projects
+    let mut projects: Vec<ProjectInfo> = detection_files
         .into_iter()
-        .map(|(path, managers)| {
+        .map(|(path, languages)| {
+            let mut seen = HashSet::new();
+            let mut languages: Vec<&str> =
+                languages.into_iter().filter(|l| seen.insert(*l)).collect();
+            languages.sort();
+
             let name = path
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
@@ -82,76 +86,119 @@ pub fn scan(base_path: &Path) -> ScanOutput {
             ProjectInfo {
                 path,
                 name,
-                package_manager: managers.first().cloned(),
+                languages: languages.into_iter().map(|s| s.to_string()).collect(),
                 children: Vec::new(),
             }
         })
         .collect();
 
+    // Sort projects deepest first for ancestor-based assignment
+    projects.sort_by_key(|p| std::cmp::Reverse(p.path.components().count()));
+
+    // Pass 2: Find target dirs in each project's subtree.
+    // Process deepest projects first so they claim their targets,
+    // and shallower projects skip areas already claimed.
+    let mut claimed: HashSet<PathBuf> = HashSet::new();
+    let mut claimed_projects: HashSet<PathBuf> = HashSet::new();
     let mut target_dirs: Vec<ScannedDir> = Vec::new();
 
     for project in &mut projects {
-        let top_level = match fs::read_dir(&project.path) {
-            Ok(rd) => rd,
-            Err(e) => {
-                errors.push(format!("Cannot read {:?}: {}", project.path, e));
-                continue;
-            }
-        };
+        let lang_names: Vec<&str> = project.languages.iter().map(|s| s.as_str()).collect();
+        let root_targets = config::root_target_dirs_for_languages(&lang_names);
+        let deep_targets = config::deep_target_dirs_for_languages(&lang_names);
 
-        for entry in top_level.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if entry.file_type().is_ok_and(|ft| ft.is_dir()) && config::is_known_target(&name) {
-                let target_path = entry.path();
+        let mut found: Vec<PathBuf> = Vec::new();
+
+        if !root_targets.is_empty() {
+            find_target_dirs(
+                &project.path,
+                &root_targets,
+                &claimed_projects,
+                false,
+                &mut found,
+                &mut errors,
+            );
+        }
+
+        if !deep_targets.is_empty() {
+            find_target_dirs(
+                &project.path,
+                &deep_targets,
+                &claimed_projects,
+                true,
+                &mut found,
+                &mut errors,
+            );
+        }
+
+        for target_path in found {
+            if claimed.insert(target_path.clone()) {
                 target_dirs.push(ScannedDir {
                     path: target_path.clone(),
                     size: 0,
                     last_modified: DateTime::UNIX_EPOCH,
-                    package_manager: project.package_manager.clone(),
                     error: None,
                 });
                 project.children.push(target_path);
             }
         }
-    }
 
-    // Pass 3: Recursive walk for orphan targets (no lock file parent).
-    let mut orphan_targets: Vec<PathBuf> = WalkDir::new(base_path)
-        .follow_links(false)
-        .into_iter()
-        .filter_entry(|e| {
-            let name = e.file_name().to_string_lossy();
-            !SKIP_DIRS.contains(&name.as_ref())
-        })
-        .flatten()
-        .filter(|e| {
-            e.file_type().is_dir() && config::is_known_target(&e.file_name().to_string_lossy())
-        })
-        .map(|e| e.path().to_path_buf())
-        .collect();
-
-    orphan_targets.sort();
-    orphan_targets.dedup_by(|a, b| a.starts_with(b));
-
-    for target_path in orphan_targets {
-        let is_associated = projects.iter().any(|p| p.children.contains(&target_path));
-        if is_associated || target_dirs.iter().any(|d| d.path == target_path) {
-            continue;
-        }
-
-        target_dirs.push(ScannedDir {
-            path: target_path,
-            size: 0,
-            last_modified: DateTime::UNIX_EPOCH,
-            package_manager: None,
-            error: None,
-        });
+        claimed_projects.insert(project.path.clone());
     }
 
     ScanOutput {
         target_dirs,
         projects,
         errors,
+    }
+}
+
+/// Walk `dir` looking for directories whose name is in `target_names`.
+/// When `recurse` is true, walk the full subtree; otherwise only check direct children.
+/// Skips VCS dirs and does not descend into paths already in `skip_projects`.
+fn find_target_dirs(
+    dir: &Path,
+    target_names: &[&str],
+    skip_projects: &HashSet<PathBuf>,
+    recurse: bool,
+    results: &mut Vec<PathBuf>,
+    errors: &mut Vec<String>,
+) {
+    let top_level = match fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(e) => {
+            errors.push(format!("Cannot read {:?}: {}", dir, e));
+            return;
+        }
+    };
+
+    for entry in top_level.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if SKIP_DIRS.contains(&name.as_str()) {
+            continue;
+        }
+        if !entry.file_type().is_ok_and(|ft| ft.is_dir()) {
+            continue;
+        }
+
+        let entry_path = entry.path();
+
+        if skip_projects.contains(&entry_path) {
+            continue;
+        }
+
+        if target_names.contains(&name.as_str()) {
+            results.push(entry_path);
+        } else if recurse {
+            find_target_dirs(
+                &entry_path,
+                target_names,
+                skip_projects,
+                recurse,
+                results,
+                errors,
+            );
+        }
     }
 }
 
@@ -215,7 +262,6 @@ fn scan_target(path: &Path) -> Result<ScannedDir, std::io::Error> {
         path: path.to_path_buf(),
         size,
         last_modified: dt,
-        package_manager: None,
         error,
     })
 }
@@ -223,7 +269,6 @@ fn scan_target(path: &Path) -> Result<ScannedDir, std::io::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
 
     fn create_test_dir() -> tempfile::TempDir {
         tempfile::tempdir().expect("failed to create temp dir")
@@ -252,12 +297,11 @@ mod tests {
         let output = scan(dir.path());
         assert_eq!(output.target_dirs.len(), 1);
         assert_eq!(output.target_dirs[0].path, project.join("node_modules"));
-        // Fast scan returns size=0; sizes computed separately via scan_target_size
         assert_eq!(output.target_dirs[0].size, 0);
     }
 
     #[test]
-    fn test_scan_detects_package_manager() {
+    fn test_scan_detects_language() {
         let dir = create_test_dir();
         let project = dir.path().join("my-app");
         create_file(&project.join("pnpm-lock.yaml"), 50);
@@ -265,11 +309,9 @@ mod tests {
         create_file(&project.join("node_modules/pkg/index.js"), 512);
 
         let output = scan(dir.path());
+        assert_eq!(output.projects.len(), 1);
+        assert_eq!(output.projects[0].languages, vec!["js"]);
         assert!(!output.target_dirs.is_empty());
-        assert_eq!(
-            output.target_dirs[0].package_manager.as_deref(),
-            Some("pnpm")
-        );
     }
 
     #[test]
@@ -292,7 +334,7 @@ mod tests {
         create_file(&app1.join("package-lock.json"), 50);
         create_dir(&app1.join("node_modules"));
         create_file(&app1.join("node_modules/pkg/index.js"), 1024);
-        create_file(&app2.join("Cargo.lock"), 50);
+        create_file(&app2.join("Cargo.toml"), 50);
         create_dir(&app2.join("target"));
         create_file(&app2.join("target/debug/app"), 2048);
 
@@ -324,38 +366,101 @@ mod tests {
         create_dir(&target);
         create_file(&target.join("lib/index.js"), 1024);
 
-        let (size, _last_modified) = scan_target_size(&target).unwrap();
+        let (size, _) = scan_target_size(&target).unwrap();
         assert!(size >= 1024);
     }
 
     #[test]
-    fn test_scan_finds_deep_orphan_targets() {
+    fn test_scan_without_lock_file_finds_nothing() {
         let dir = create_test_dir();
-        let project = dir.path().join("project");
-        create_file(&project.join("package-lock.json"), 50);
-        create_dir(&project.join("node_modules"));
-        create_file(&project.join("node_modules/pkg/index.js"), 1024);
-        // Deep orphan: inside a non-project subdirectory
-        create_dir(&project.join("test"));
-        create_dir(&project.join("test").join("node_modules"));
-        create_file(&project.join("test/node_modules/deep-pkg/index.js"), 2048);
-        // Root-level orphan
-        create_dir(&dir.path().join("node_modules"));
-        create_file(&dir.path().join("node_modules/root-pkg/index.js"), 512);
-        // Nested node_modules inside root node_modules — should not be a separate target
-        create_dir(&dir.path().join("node_modules/dep_1"));
-        create_dir(&dir.path().join("node_modules/dep_1/node_modules"));
+        create_dir(&dir.path().join("vendor"));
+        create_file(&dir.path().join("vendor/dep.js"), 512);
+
+        let output = scan(dir.path());
+        assert!(
+            output.target_dirs.is_empty(),
+            "vendor without detection file should not be found"
+        );
+    }
+
+    #[test]
+    fn test_scan_finds_nested_targets_in_subtree() {
+        let dir = create_test_dir();
+        let project = dir.path().join("my-app");
+        create_file(&project.join("pyproject.toml"), 50);
+        create_dir(&project.join("src"));
+        create_dir(&project.join("src/mypkg/__pycache__"));
+        create_file(
+            &project.join("src/mypkg/__pycache__/module.cpython-312.pyc"),
+            256,
+        );
+        create_dir(&project.join("tests/__pycache__"));
+        create_file(&project.join("tests/__pycache__/test.cpython-312.pyc"), 128);
+
+        let output = scan(dir.path());
+
+        let paths: Vec<_> = output.target_dirs.iter().map(|d| d.path.clone()).collect();
+        assert_eq!(output.target_dirs.len(), 2);
+        assert!(paths.contains(&project.join("src/mypkg/__pycache__")));
+        assert!(paths.contains(&project.join("tests/__pycache__")));
+    }
+
+    #[test]
+    fn test_scan_does_not_double_count_nested_targets() {
+        let dir = create_test_dir();
+        create_file(&dir.path().join("package-lock.json"), 50);
+        create_dir(&dir.path().join("node_modules/dep/node_modules"));
         create_file(
             &dir.path()
-                .join("node_modules/dep_1/node_modules/dep_1_deep/index.js"),
+                .join("node_modules/dep/node_modules/deep/index.js"),
             256,
         );
 
         let output = scan(dir.path());
-        let paths: Vec<_> = output.target_dirs.iter().map(|d| d.path.clone()).collect();
-        assert_eq!(output.target_dirs.len(), 3);
-        assert!(paths.contains(&project.join("node_modules")));
-        assert!(paths.contains(&project.join("test/node_modules")));
-        assert!(paths.contains(&dir.path().join("node_modules")));
+        assert_eq!(output.target_dirs.len(), 1);
+        assert_eq!(output.target_dirs[0].path, dir.path().join("node_modules"));
+    }
+
+    #[test]
+    fn test_scan_monorepo_nested_projects() {
+        let dir = create_test_dir();
+        create_file(&dir.path().join("package-lock.json"), 50);
+        create_dir(&dir.path().join("node_modules"));
+        create_file(&dir.path().join("node_modules/pkg/index.js"), 1024);
+
+        create_dir(&dir.path().join("packages/foo"));
+        create_file(&dir.path().join("packages/foo/package-lock.json"), 30);
+        create_dir(&dir.path().join("packages/foo/node_modules"));
+        create_file(
+            &dir.path().join("packages/foo/node_modules/sub/index.js"),
+            512,
+        );
+
+        let output = scan(dir.path());
+
+        assert_eq!(output.target_dirs.len(), 2);
+        assert_eq!(output.projects.len(), 2);
+
+        let foo_project = output.projects.iter().find(|p| p.name == "foo").unwrap();
+        assert_eq!(foo_project.children.len(), 1);
+    }
+
+    #[test]
+    fn test_scan_go_vendor_root_only() {
+        let dir = create_test_dir();
+        let project = dir.path().join("proj");
+        create_file(&project.join("go.mod"), 20);
+        create_dir(&project.join("vendor"));
+        create_file(&project.join("vendor/dep/index.js"), 1024);
+        create_dir(&project.join("src/vendor"));
+        create_file(&project.join("src/vendor/own_code.js"), 512);
+
+        let output = scan(dir.path());
+
+        assert_eq!(output.target_dirs.len(), 1);
+        assert_eq!(output.target_dirs[0].path, project.join("vendor"));
+        assert_eq!(output.projects.len(), 1);
+        assert_eq!(output.projects[0].children.len(), 1);
+        assert_eq!(output.projects[0].children[0], project.join("vendor"));
     }
 }

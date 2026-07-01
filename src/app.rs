@@ -63,7 +63,7 @@ impl OrderBy {
             OrderBy::DateAsc => OrderBy::NameDesc,
             OrderBy::DateDesc => OrderBy::DateAsc,
             OrderBy::SizeAsc => OrderBy::DateDesc,
-            OrderBy::SizeDesc => OrderBy::SizeAsc,
+            OrderBy::SizeDesc => OrderBy::DateAsc,
         }
     }
 }
@@ -72,13 +72,12 @@ impl OrderBy {
 pub enum TreeEntry {
     ProjectHeader {
         name: String,
-        package_manager: Option<String>,
+        languages: Vec<String>,
     },
     TargetDir {
         path: PathBuf,
         size: u64,
         last_modified: DateTime<Utc>,
-        package_manager: Option<String>,
         is_last: bool,
     },
 }
@@ -141,8 +140,6 @@ impl AppState {
         let mut tree: Vec<TreeEntry> = Vec::new();
 
         for project in &output.projects {
-            let mut subtree: Vec<TreeEntry> = Vec::new();
-
             let children: Vec<&ScannedDir> = output
                 .target_dirs
                 .iter()
@@ -153,66 +150,22 @@ impl AppState {
                 continue;
             }
 
+            let mut subtree: Vec<TreeEntry> = Vec::new();
             for (i, child) in children.iter().enumerate() {
                 let is_last = i == children.len() - 1;
                 subtree.push(TreeEntry::TargetDir {
                     path: child.path.clone(),
                     size: child.size,
                     last_modified: child.last_modified,
-                    package_manager: child.package_manager.clone(),
                     is_last,
                 });
             }
 
-            subtree.insert(
-                0,
-                TreeEntry::ProjectHeader {
-                    name: project.name.clone(),
-                    package_manager: project.package_manager.clone(),
-                },
-            );
-
+            tree.push(TreeEntry::ProjectHeader {
+                name: project.name.clone(),
+                languages: project.languages.clone(),
+            });
             tree.extend(subtree);
-        }
-
-        let unassigned: Vec<&ScannedDir> = output
-            .target_dirs
-            .iter()
-            .filter(|d| !output.projects.iter().any(|p| p.children.contains(&d.path)))
-            .collect();
-
-        if !unassigned.is_empty() {
-            let mut by_parent: HashMap<PathBuf, Vec<&ScannedDir>> = HashMap::new();
-            for dir in &unassigned {
-                if let Some(parent) = dir.path.parent() {
-                    by_parent.entry(parent.to_path_buf()).or_default().push(dir);
-                }
-            }
-
-            for dirs in by_parent.values() {
-                let parent_name = dirs[0]
-                    .path
-                    .parent()
-                    .and_then(|p| p.file_name())
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "unknown".to_string());
-
-                tree.push(TreeEntry::ProjectHeader {
-                    name: parent_name,
-                    package_manager: None,
-                });
-
-                for (i, child) in dirs.iter().enumerate() {
-                    let is_last = i == dirs.len() - 1;
-                    tree.push(TreeEntry::TargetDir {
-                        path: child.path.clone(),
-                        size: child.size,
-                        last_modified: child.last_modified,
-                        package_manager: child.package_manager.clone(),
-                        is_last,
-                    });
-                }
-            }
         }
 
         self.sizes_total = tree
@@ -236,7 +189,6 @@ impl AppState {
             .sum();
         self.rebuild_target_index();
         self.clamp_index();
-        // Start cursor on first TargetDir
         self.list_index = self
             .tree
             .iter()
@@ -629,7 +581,7 @@ mod tests {
         let project = ProjectInfo {
             path: PathBuf::from("/test/my-app"),
             name: "my-app".to_string(),
-            package_manager: Some("npm".to_string()),
+            languages: vec!["js".to_string()],
             children: vec![
                 PathBuf::from("/test/my-app/node_modules"),
                 PathBuf::from("/test/my-app/.next"),
@@ -641,14 +593,12 @@ mod tests {
                 path: PathBuf::from("/test/my-app/node_modules"),
                 size: 1_200_000_000,
                 last_modified: Utc::now(),
-                package_manager: Some("npm".to_string()),
                 error: None,
             },
             ScannedDir {
                 path: PathBuf::from("/test/my-app/.next"),
                 size: 500_000_000,
                 last_modified: Utc::now(),
-                package_manager: Some("npm".to_string()),
                 error: None,
             },
         ];
@@ -676,7 +626,7 @@ mod tests {
         let project = ProjectInfo {
             path: PathBuf::from("/test/empty-app"),
             name: "empty-app".to_string(),
-            package_manager: Some("npm".to_string()),
+            languages: vec!["js".to_string()],
             children: vec![],
         };
 
@@ -729,17 +679,16 @@ mod tests {
     fn test_move_up_down() {
         let mut state = AppState::new(PathBuf::from("/test"));
         state.build_tree(make_scan_output());
-        // Cursor starts on first TargetDir (index 1, skipping ProjectHeader at 0)
         assert_eq!(state.list_index, 1);
 
         state.move_down();
         assert_eq!(state.list_index, 2);
         state.move_down();
-        assert_eq!(state.list_index, 2); // already at end
+        assert_eq!(state.list_index, 2);
         state.move_up();
         assert_eq!(state.list_index, 1);
         state.move_up();
-        assert_eq!(state.list_index, 1); // can't go past first TargetDir
+        assert_eq!(state.list_index, 1);
     }
 
     #[test]
@@ -778,14 +727,12 @@ mod tests {
         let mut state = AppState::new(PathBuf::from("/test"));
         state.build_tree(make_scan_output());
 
-        // Select only the first target dir
         state.list_index = 1;
         state.toggle_selection();
         assert_eq!(state.selection_count(), 1);
 
         state.remove_deleted_from_tree();
 
-        // Project header + 1 remaining target dir
         assert_eq!(state.tree.len(), 2);
         assert!(matches!(state.tree[0], TreeEntry::ProjectHeader { .. }));
         assert!(matches!(state.tree[1], TreeEntry::TargetDir { .. }));
@@ -817,6 +764,6 @@ mod tests {
         for _ in 0..10 {
             state.move_up();
         }
-        assert_eq!(state.list_index, 1); // stays on first TargetDir
+        assert_eq!(state.list_index, 1);
     }
 }
