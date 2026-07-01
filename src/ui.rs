@@ -12,9 +12,7 @@ use crate::app::{AppPhase, AppState, DeletePreference, OrderBy, TreeEntry};
 mod palette {
     use ratatui::style::Color;
 
-    // Foreground-only palette for frosted glass / semi-opaque terminals.
-    // Background colors are unreliable on frosted glass, so we avoid them.
-
+    pub const BG: Color = Color::Black;
     pub const HEADER: Color = Color::Rgb(180, 200, 255);
     pub const STATUS: Color = Color::Rgb(180, 220, 200);
     pub const NOTIFY: Color = Color::Rgb(80, 220, 120);
@@ -38,6 +36,11 @@ mod palette {
 }
 
 pub fn render(state: &mut AppState, frame: &mut Frame) {
+    frame.render_widget(
+        Block::default().style(Style::default().bg(palette::BG)),
+        frame.area(),
+    );
+
     let areas = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),
@@ -364,36 +367,32 @@ fn render_confirm_dialog(state: &AppState, frame: &mut Frame, area: Rect) {
     )));
     lines.push(Line::from(""));
 
-    let (dry_fg, trash_fg, permanent_fg) = match state.delete_preference {
-        DeletePreference::DryRun => (
-            palette::SELECTED,
-            palette::DIALOG_HINT,
-            palette::DIALOG_HINT,
-        ),
-        DeletePreference::Trash => (
-            palette::DIALOG_HINT,
-            palette::SELECTED,
-            palette::DIALOG_HINT,
-        ),
-        DeletePreference::Permanent => (
-            palette::DIALOG_HINT,
-            palette::DIALOG_HINT,
-            palette::SELECTED,
-        ),
-    };
+    let variants = [
+        (DeletePreference::DryRun, "Dry run (show only)"),
+        (DeletePreference::Trash, "Trash (move to trash)"),
+        (DeletePreference::Permanent, "Permanent delete"),
+    ];
 
-    lines.push(Line::from(vec![Span::styled(
-        "  Dry run (show only)",
-        dry_fg,
-    )]));
-    lines.push(Line::from(vec![Span::styled(
-        "  Trash (move to trash)",
-        trash_fg,
-    )]));
-    lines.push(Line::from(vec![Span::styled(
-        "  Permanent delete",
-        permanent_fg,
-    )]));
+    for (variant, label) in &variants {
+        let is_active = *variant == state.delete_preference;
+        let bullet = if is_active { "\u{25CF}" } else { "\u{25CB}" };
+        let fg = if is_active {
+            palette::SELECTED
+        } else {
+            palette::DIALOG_TEXT
+        };
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                format!("{} {}", bullet, label),
+                Style::default().fg(fg).add_modifier(if is_active {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
+            ),
+        ]));
+    }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         " [Enter] confirm  [Esc] cancel  [\u{2191}/\u{2193}] toggle mode",

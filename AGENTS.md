@@ -35,6 +35,11 @@ Entry point: `main.rs:fn main()`. TUI loop: `main.rs:fn run_app()`. Library root
 - **Clippy**: `-D warnings` — no warnings allowed
 - **Do not commit unless explicitly asked** — always wait for user confirmation before committing
 
+## Branch Rules
+
+- `main` is protected — all changes must go through a PR
+- Feature branches named `kebab-case` (e.g. `ui-polish`, `language-based-redesign`)
+
 ## Gotchas
 
 - `tempfile` is in both `[dependencies]` and `[dev-dependencies]` — needed at runtime for `commands.rs` update downloads
