@@ -1,6 +1,6 @@
 {
   "name": "dirsweep",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "A TUI tool for finding and removing bloated project directories",
   "bin": {
     "dirsweep": "./bin.js"
