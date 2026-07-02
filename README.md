@@ -139,7 +139,7 @@ Root-level `node_modules` in monorepos are highlighted as they may be shared acr
 ### Results
 
 | Scenario | ds (s) | np (s) | ds (MB) | np (MB) | Result |
-|---|---|---|---|---|---|---|
+|---|---|---|---|---|---|
 | Node monorepo | 0.064 | 0.272 | 7 | 171 | **dirsweep 4.2× faster** |
 | Multi-language | 0.062 | 0.136 | 7 | 170 | **dirsweep 2.2× faster** |
 | 500 tiny projs | 0.098 | 4.430 | 7 | 188 | **dirsweep 45.1× faster** |
