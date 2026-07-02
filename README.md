@@ -131,3 +131,52 @@ dirsweep uninstall --force  # skip confirmation
 | `Cargo.toml` with `members` | Rust workspace |
 
 Root-level `node_modules` in monorepos are highlighted as they may be shared across packages — deleting them could break the entire workspace.
+
+## Benchmark
+
+`dirsweep` is benchmarked against [`npkill`](https://github.com/voidcosmos/npkill) — the most popular CLI tool for finding and removing `node_modules` directories. Both tools run in TUI mode through a PTY, measuring wall time and peak RSS.
+
+### Results
+
+| Scenario | ds (s) | np (s) | ds (MB) | np (MB) | Result |
+|---|---|---|---|---|---|---|
+| Node monorepo | 0.064 | 0.272 | 7 | 171 | **dirsweep 4.2× faster** |
+| Multi-language | 0.062 | 0.136 | 7 | 170 | **dirsweep 2.2× faster** |
+| 500 tiny projs | 0.098 | 4.430 | 7 | 188 | **dirsweep 45.1× faster** |
+| Deep nesting | 0.067 | 0.973 | 7 | 176 | **dirsweep 14.5× faster** |
+| Large targets | 0.061 | 0.112 | 7 | 169 | **dirsweep 1.8× faster** |
+
+*Averages of 10 runs on synthetic fixtures (low variance). ds = dirsweep v0.3.0, np = npkill v0.12.2.*
+
+### Scenarios
+
+| # | Name | Description |
+|---|------|-------------|
+| 1 | Node monorepo | Root project + 20 JS sub-packages, `.next` build output |
+| 2 | Multi-language | 5 JS, 5 Rust, 5 Python projects with their respective junk dirs |
+| 3 | 500 tiny projs | 500 minimal JS projects, each with 1 KB `node_modules` |
+| 4 | Deep nesting | 10 nested projects + 100 random-depth tiny projects |
+| 5 | Large targets | 3 JS projects with 100, 200, 300 MB `node_modules` |
+
+### Run it yourself
+
+Requirements:
+
+- **dirsweep** — build from source: `cargo build --release`
+- **npkill** — install globally: `npm install -g npkill` (or via `pnpm`/`yarn`)
+- **Python 3** — used for PTY automation
+- **bash**, `find`, `truncate`, `awk` — standard POSIX tools
+
+```bash
+# From the repo root:
+bash bench/bench.sh
+
+# Only create fixtures (skip the benchmark):
+bash bench/bench.sh --prepare
+
+# Customise:
+DIRSWEEP=target/debug/dirsweep RUNS=5 SCENARIOS="1 3" bash bench/bench.sh
+```
+
+Fixtures are created in `bench/fixtures/` and left after the run for inspection.
+Remove them with `rm -rf bench/fixtures`.
