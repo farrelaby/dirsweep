@@ -478,6 +478,27 @@ mod tests {
         assert!(size >= 1024);
     }
 
+    /// Hidden files inside a target dir must contribute to its size.
+    ///
+    /// Several parallel walkers (jwalk, dua's entry point) skip dotfiles by
+    /// default. That failure is silent — sizes come out low but plausible, and
+    /// the ordinary size test above still passes because it only checks a
+    /// visible file. This pins the behaviour before any walker swap.
+    #[test]
+    fn test_scan_target_size_counts_hidden_files() {
+        let dir = create_test_dir();
+        let target = dir.path().join("node_modules");
+        create_dir(&target);
+        create_file(&target.join("visible.js"), 1_000);
+        create_file(&target.join(".cache/hidden.bin"), 500);
+
+        let (size, _) = scan_target_size(&target).unwrap();
+        assert!(
+            size >= 1_500,
+            "hidden files must be counted, got {size} — walker is skipping dotfiles"
+        );
+    }
+
     #[test]
     fn test_scan_without_lock_file_finds_nothing() {
         let dir = create_test_dir();

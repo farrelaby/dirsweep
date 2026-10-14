@@ -564,6 +564,7 @@ dependencies = [
  "crossterm",
  "humansize",
  "ratatui",
+ "rayon",
  "self-replace",
  "serde_json",
  "tempfile",

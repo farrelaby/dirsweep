@@ -12,6 +12,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
+use rayon::prelude::*;
 
 use dirsweep::app::{AppPhase, AppState, DeletePreference, TreeEntry};
 
@@ -132,27 +133,32 @@ fn run_app(
         })
         .collect();
 
+    // Fan the size walk across rayon rather than walking every target
+    // sequentially on one thread. Each target is an independent subtree, so
+    // this scales with cores. Messages still stream per target as they finish,
+    // so the UI fills in progressively instead of all at once at the end.
+    //
+    // The sender is cloned rather than shared: std mpsc is multi-producer, so
+    // each rayon task sends through its own handle and nothing needs a lock.
+    let tx_updates = tx.clone();
     thread::spawn(move || {
-        for path in target_paths {
-            match dirsweep::scanner::scan_target_size(&path) {
-                Ok((size, last_modified)) => {
-                    let _ = tx.send(SizeUpdate::Update {
-                        path,
-                        size,
-                        last_modified,
-                        error: None,
-                    });
-                }
-                Err(e) => {
-                    let _ = tx.send(SizeUpdate::Update {
-                        path,
-                        size: 0,
-                        last_modified: DateTime::UNIX_EPOCH,
-                        error: Some(e.to_string()),
-                    });
-                }
-            }
-        }
+        target_paths.into_par_iter().for_each(|path| {
+            let update = match dirsweep::scanner::scan_target_size(&path) {
+                Ok((size, last_modified)) => SizeUpdate::Update {
+                    path,
+                    size,
+                    last_modified,
+                    error: None,
+                },
+                Err(e) => SizeUpdate::Update {
+                    path,
+                    size: 0,
+                    last_modified: DateTime::UNIX_EPOCH,
+                    error: Some(e.to_string()),
+                },
+            };
+            let _ = tx_updates.send(update);
+        });
         let _ = tx.send(SizeUpdate::Done);
     });
 
