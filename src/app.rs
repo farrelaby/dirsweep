@@ -139,11 +139,26 @@ impl AppState {
     pub fn build_tree(&mut self, output: ScanOutput) {
         let mut tree: Vec<TreeEntry> = Vec::new();
 
+        // Index targets once instead of rescanning them for every project.
+        // Scanning `target_dirs` per project is O(projects × targets), which is
+        // quadratic and dominates the pipeline on wide trees — 58% of
+        // scan + build_tree on `many-tiny` (500 × 500).
+        //
+        // Iterating `project.children` rather than `target_dirs` preserves the
+        // original order: scan() appends each project's newly claimed targets
+        // back to back, in `found` order, so a project's children occupy one
+        // contiguous run of `target_dirs` in exactly that order.
+        let by_path: HashMap<&Path, &ScannedDir> = output
+            .target_dirs
+            .iter()
+            .map(|d| (d.path.as_path(), d))
+            .collect();
+
         for project in &output.projects {
-            let children: Vec<&ScannedDir> = output
-                .target_dirs
+            let children: Vec<&ScannedDir> = project
+                .children
                 .iter()
-                .filter(|d| project.children.contains(&d.path))
+                .filter_map(|p| by_path.get(p.as_path()).copied())
                 .collect();
 
             if children.is_empty() {
@@ -619,6 +634,63 @@ mod tests {
         assert!(matches!(state.tree[0], TreeEntry::ProjectHeader { .. }));
         assert!(matches!(state.tree[1], TreeEntry::TargetDir { .. }));
         assert!(matches!(state.tree[2], TreeEntry::TargetDir { .. }));
+    }
+
+    /// `build_tree` must emit children in scan order, not sorted order.
+    ///
+    /// The paths here are deliberately reverse-alphabetical: build_tree used to
+    /// drive iteration from `target_dirs`, and now drives it from
+    /// `project.children`. Both agree in production because scan() appends each
+    /// project's targets back to back — this pins that down so a later refactor
+    /// that sorts children instead of preserving scan order is caught.
+    #[test]
+    fn test_build_tree_preserves_child_order() {
+        let z = PathBuf::from("/test/app/z-target");
+        let a = PathBuf::from("/test/app/a-target");
+
+        let project = ProjectInfo {
+            path: PathBuf::from("/test/app"),
+            name: "app".to_string(),
+            languages: vec!["js".to_string()],
+            children: vec![z.clone(), a.clone()],
+        };
+
+        let output = ScanOutput {
+            target_dirs: vec![
+                ScannedDir {
+                    path: z.clone(),
+                    size: 0,
+                    last_modified: Utc::now(),
+                    error: None,
+                },
+                ScannedDir {
+                    path: a.clone(),
+                    size: 0,
+                    last_modified: Utc::now(),
+                    error: None,
+                },
+            ],
+            projects: vec![project],
+            ..Default::default()
+        };
+
+        let mut state = AppState::new(PathBuf::from("/test"));
+        state.build_tree(output);
+
+        let got: Vec<PathBuf> = state
+            .tree
+            .iter()
+            .filter_map(|e| match e {
+                TreeEntry::TargetDir { path, .. } => Some(path.clone()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            got,
+            vec![z, a],
+            "children must keep scan order, not be reordered or dropped"
+        );
     }
 
     #[test]
