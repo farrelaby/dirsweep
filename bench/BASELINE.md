@@ -399,3 +399,31 @@ confirming the gain is rayon rather than the clock.
 | A instrumentation | nothing (by design) | all benchmarks within 2% |
 | B `build_tree` index | `pipeline/many-tiny` −57.6% | `scan`, `size`, `render` within 3% |
 | C rayon size | `size` 3.4–6.0× faster | `pipeline`, `scan`, `build_tree` unchanged |
+
+### Measurement stability
+
+Two runs of **identical, unmodified code** roughly twenty minutes apart, both
+within one session, produced:
+
+| group | spread between runs |
+|---|---|
+| `scan/*` | ±0.8% |
+| `size/*` | ±1.0% |
+| `render/many-tiny`, `render/deep-nesting` | stable, and the −45% / −14% moves held |
+| `render/node-monorepo`, `render/multi-lang`, `render/dense-targets` | **±6–8%** |
+
+One run measured the three short `render` benchmarks as *regressing* +5.6% to
++7.3% against the baseline; the re-run measured the same binary at −2.0% to
+−3.2%. Nothing had changed between them. Criterion reported `p = 0.00` for both
+directions, so the significance test does not protect against this — it tests
+against sampling noise within a run, not drift *between* runs.
+
+Consequences for judging later phases:
+
+- **Judge on `many-tiny` and `deep-nesting`.** Those are the scenarios where the
+  fixtures are large enough for a real effect to clear the noise floor.
+- **Treat any change below ~8% on the short `render` benchmarks as unattributable.**
+  The short benchmarks are the least stable in the suite.
+- **`scan` and `size` remain trustworthy controls** at ±1%, which is why the
+  walker phase can still be attributed cleanly.
+- A "regression" that disappears on re-run is drift. Re-run before believing it.
