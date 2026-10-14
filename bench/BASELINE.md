@@ -228,6 +228,43 @@ background worker after the first frame, so `size` costs the user nothing
 upfront. It is still the largest single cost overall, and the one a parallelised
 worker would attack.
 
+### How `scan` divides between its passes
+
+`ScanStats` gained `pass1_us` / `project_build_us` / `pass2_us` to answer one
+question: a parallel walker replaces **pass 1 only** — pass 2 (`find_target_dirs`)
+is hand-rolled `fs::read_dir` recursion that no walker crate touches. Choosing a
+walker without this split would risk adding a dependency that speeds up the
+minority of the work.
+
+Mean of 20 scans per fixture:
+
+| scenario | pass1 | build | pass2 | sum | pass1 % of `scan` | pass1 % of `pipeline` |
+|---|---|---|---|---|---|---|
+| node-monorepo | 330 us | 12 us | 221 us | 563 us | **58.6%** | 40.4% |
+| multi-lang | 339 us | 4 us | 254 us | 597 us | **56.8%** | 41.1% |
+| many-tiny | 7,858 us | 167 us | 5,401 us | 13,426 us | **58.5%** | 22.9% |
+| deep-nesting | 1,918 us | 132 us | 1,166 us | 3,216 us | **59.6%** | 43.0% |
+| dense-targets | 53 us | 0 us | 28 us | 81 us | **65.4%** | 26.2% |
+
+**Pass 1 is 57–65% of `scan` in every scenario** — consistent, not a quirk of
+one fixture. The gate for a parallel walker passes.
+
+**The instrumentation is accurate.** `sum` covers 95–100% of the independently
+measured `scan` (e.g. `many-tiny` 13,426 us against `scan` at 13,574 us), so the
+three marks bracket nearly all the work and are not double-counting.
+
+**The instrumentation is free.** Re-running every benchmark with the marks added
+came within **±2%** of the recorded baseline (`pipeline/many-tiny` 34.335 ms vs
+34.758 ms, `scan/many-tiny` 13.574 vs 13.593). That also confirms the baseline
+is reproducible in a back-to-back session — unlike the 1.87× drift seen between
+sessions an hour apart.
+
+**Ceiling:** even a walker that made pass 1 cost nothing could only take
+`pipeline` down by 23–43%, depending on scenario. On `many-tiny` the
+`build_tree` fix (58%) is worth more than twice as much as the walker; on the
+other four, the walker is the larger prize. They are complementary, not
+competing.
+
 ---
 
 ## Work counters
