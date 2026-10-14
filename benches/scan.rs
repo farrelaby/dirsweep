@@ -214,6 +214,71 @@ fn report_stats(fixtures: &[Fixture]) {
     println!("         pruned   = subtrees skipped, detect = detection files matched,");
     println!("         tgt_d    = directories opened while looking for targets");
     println!();
+
+    report_pass_split(fixtures);
+}
+
+/// Print how `scan`'s wall time divides between its three phases.
+///
+/// This is the input to choosing a parallelism strategy: a parallel walker
+/// only replaces pass 1, while pass 2 is hand-rolled recursion that a walker
+/// never touches. Getting that backwards would add a dependency for no gain.
+///
+/// A single scan is too short to time reliably — `dense-targets` scans in
+/// ~85µs — so this averages repeated scans. Unlike the counters above, these
+/// numbers are wall-clock and will differ between runs.
+fn report_pass_split(fixtures: &[Fixture]) {
+    const SAMPLES: u64 = 20;
+
+    println!(
+        "── scan pass split (mean of {} scans, µs) ──────────────────────────",
+        SAMPLES
+    );
+    println!(
+        "{:<16} {:>10} {:>10} {:>10} {:>10} {:>7} {:>7}",
+        "scenario", "pass1_us", "build_us", "pass2_us", "sum_us", "p1%", "p2%"
+    );
+
+    for f in fixtures {
+        let mut p1 = 0u64;
+        let mut build = 0u64;
+        let mut p2 = 0u64;
+
+        for _ in 0..SAMPLES {
+            let s = scanner::scan(&f.dir).stats;
+            p1 += s.pass1_us;
+            build += s.project_build_us;
+            p2 += s.pass2_us;
+        }
+
+        let p1 = p1 / SAMPLES;
+        let build = build / SAMPLES;
+        let p2 = p2 / SAMPLES;
+        let total = p1 + build + p2;
+        let pct = |v: u64| {
+            if total > 0 {
+                v as f64 * 100.0 / total as f64
+            } else {
+                0.0
+            }
+        };
+
+        println!(
+            "{:<16} {:>10} {:>10} {:>10} {:>10} {:>6.1}% {:>6.1}%",
+            f.name,
+            p1,
+            build,
+            p2,
+            total,
+            pct(p1),
+            pct(p2),
+        );
+    }
+
+    println!();
+    println!("pass1 = discovery walk (walkdir), build = detection hits -> projects,");
+    println!("        pass2 = target claiming (hand-rolled read_dir recursion)");
+    println!();
 }
 
 fn main() {

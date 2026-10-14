@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
+use std::time::{Instant, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
 use walkdir::WalkDir;
@@ -45,6 +45,17 @@ pub struct ScanStats {
     pub target_walk_dirs: u64,
     /// Target directories ultimately claimed.
     pub target_dirs_found: u64,
+    /// Wall time spent in pass 1 (the recursive discovery walk), microseconds.
+    ///
+    /// The three timings below bracket the work `scan` performs, so they
+    /// should sum to roughly `scan` itself. They exist to say *which* pass
+    /// dominates before choosing a parallelism strategy for it — a walker
+    /// only affects pass 1, and pass 2 is hand-rolled recursion.
+    pub pass1_us: u64,
+    /// Wall time turning detection hits into sorted projects, microseconds.
+    pub project_build_us: u64,
+    /// Wall time in pass 2 (target claiming), microseconds.
+    pub pass2_us: u64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -59,6 +70,8 @@ pub fn scan(base_path: &Path) -> ScanOutput {
     let mut detection_files: HashMap<PathBuf, Vec<&str>> = HashMap::new();
     let mut errors: Vec<String> = Vec::new();
     let mut stats = ScanStats::default();
+
+    let t0 = Instant::now();
 
     // Pass 1: Walk tree to find detection files.
     // filter_entry skips entering known target dirs and VCS dirs entirely.
@@ -106,8 +119,10 @@ pub fn scan(base_path: &Path) -> ScanOutput {
     }
 
     stats.pruned_subtrees = pruned.get();
+    stats.pass1_us = t0.elapsed().as_micros() as u64;
 
     // Build projects
+    let t1 = Instant::now();
     let mut projects: Vec<ProjectInfo> = detection_files
         .into_iter()
         .map(|(path, languages)| {
@@ -131,6 +146,9 @@ pub fn scan(base_path: &Path) -> ScanOutput {
 
     // Sort projects deepest first for ancestor-based assignment
     projects.sort_by_key(|p| std::cmp::Reverse(p.path.components().count()));
+    stats.project_build_us = t1.elapsed().as_micros() as u64;
+
+    let t2 = Instant::now();
 
     // Pass 2: Find target dirs in each project's subtree.
     // Process deepest projects first so they claim their targets,
@@ -185,6 +203,7 @@ pub fn scan(base_path: &Path) -> ScanOutput {
         claimed_projects.insert(project.path.clone());
     }
 
+    stats.pass2_us = t2.elapsed().as_micros() as u64;
     stats.target_dirs_found = target_dirs.len() as u64;
 
     ScanOutput {
@@ -363,6 +382,30 @@ mod tests {
         // Root + my-app are entered; node_modules is not.
         assert_eq!(output.stats.discovery_dirs, 2);
         assert_eq!(output.stats.discovery_files, 1);
+    }
+
+    #[test]
+    fn test_scan_phase_timings_cover_scan() {
+        let dir = create_test_dir();
+        let project = dir.path().join("my-app");
+        create_file(&project.join("package-lock.json"), 50);
+        create_dir(&project.join("node_modules"));
+        create_file(&project.join("node_modules/pkg/index.js"), 1024);
+
+        let t = Instant::now();
+        let output = scan(dir.path());
+        let total = t.elapsed().as_micros() as u64;
+
+        let s = output.stats;
+        let split = s.pass1_us + s.project_build_us + s.pass2_us;
+
+        // The three marks all sit inside `scan`, so together they cannot
+        // exceed it — a violation means the marks overlap and the reported
+        // split is meaningless. Slack covers coarse clock granularity.
+        assert!(
+            split <= total + 100,
+            "phase sum {split}us exceeds whole scan {total}us"
+        );
     }
 
     #[test]
