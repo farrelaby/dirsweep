@@ -181,19 +181,10 @@ fn render_browsing(state: &mut AppState, frame: &mut Frame, area: Rect) {
     let end = (scroll_offset + visible).min(total);
     let slice = &state.tree[scroll_offset..end];
 
-    let max_path_width = state
-        .tree
-        .iter()
-        .filter_map(|e| {
-            if let TreeEntry::TargetDir { path, .. } = e {
-                let display_path = path.strip_prefix(&state.scan_path).unwrap_or(path);
-                Some(display_path.to_string_lossy().len())
-            } else {
-                None
-            }
-        })
-        .max()
-        .unwrap_or(0);
+    // Cached on AppState rather than recomputed here. Deriving this per frame walked every
+    // target in the tree, so frame cost tracked total tree size rather than the visible
+    // slice it exists to serve. The inputs change only when the tree does.
+    let max_path_width = state.max_path_width();
 
     // Use table alignment only when terminal has enough room.
     // Overhead: highlight(2) + prefix(3) + checkbox(3) + spaces(3) + max_size(8) + max_time(12) + margin(2)

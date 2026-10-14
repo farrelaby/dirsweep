@@ -28,6 +28,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - `pipeline/many-tiny` 34.76 ms → 14.74 ms (−57.6%), driven by `build_tree/many-tiny` 20.11 ms → 0.44 ms (−97.8%)
 - `pipeline/deep-nesting` 4.50 ms → 3.62 ms (−19.6%)
 - Size computation 3.4–6.0× faster depending on target count, measured within a single run against the sequential control
+- `render/many-tiny` 366.75 µs → 202.10 µs (−45%) and `render/deep-nesting` 259.25 µs → 221.40 µs (−14%), from caching the maximum path width instead of deriving it from the whole tree on every frame
 
 ## [0.3.0] - 2026-07-01
 

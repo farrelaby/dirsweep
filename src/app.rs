@@ -106,6 +106,7 @@ pub struct AppState {
     pub deleting_index: usize,
     pub deleting_failed: Vec<PathBuf>,
     target_index: HashMap<PathBuf, usize>,
+    max_path_width: usize,
 }
 
 impl AppState {
@@ -133,6 +134,7 @@ impl AppState {
             deleting_index: 0,
             deleting_failed: Vec::new(),
             target_index: HashMap::new(),
+            max_path_width: 0,
         }
     }
 
@@ -203,6 +205,7 @@ impl AppState {
             })
             .sum();
         self.rebuild_target_index();
+        self.recompute_max_path_width();
         self.clamp_index();
         self.list_index = self
             .tree
@@ -312,6 +315,7 @@ impl AppState {
         self.tree = new_tree;
         self.total_selected_size = 0;
         self.rebuild_target_index();
+        self.recompute_max_path_width();
         self.clamp_index();
     }
 
@@ -337,6 +341,38 @@ impl AppState {
                 self.target_index.insert(path.clone(), i);
             }
         }
+    }
+
+    /// Widest display path, used to decide table alignment and pad the path column.
+    ///
+    /// Cached here rather than derived in the render loop. Deriving it there walks every
+    /// target in the tree on every frame, so frame cost would track total tree size rather
+    /// than the visible slice — and it exists to serve ~40 visible rows. Its inputs only
+    /// change when the tree does, so both tree mutators refresh it.
+    ///
+    /// Reordering does not: `order_tree` reshuffles the same paths, so the width is
+    /// unchanged and must not be recomputed.
+    fn recompute_max_path_width(&mut self) {
+        let scan_path = &self.scan_path;
+        let width = self
+            .tree
+            .iter()
+            .filter_map(|e| match e {
+                TreeEntry::TargetDir { path, .. } => Some(
+                    path.strip_prefix(scan_path)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .len(),
+                ),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
+        self.max_path_width = width;
+    }
+
+    pub fn max_path_width(&self) -> usize {
+        self.max_path_width
     }
 
     pub fn order_tree(&mut self, by: OrderBy) {
@@ -691,6 +727,27 @@ mod tests {
             vec![z, a],
             "children must keep scan order, not be reordered or dropped"
         );
+    }
+
+    /// `max_path_width` is derived once per tree change, not once per frame.
+    ///
+    /// It feeds only table alignment and column padding, but computing it in the render
+    /// loop walked every target in the tree — so frame cost scaled with total tree size
+    /// rather than the ~40 visible rows it exists to serve.
+    #[test]
+    fn test_max_path_width_is_cached_and_survives_reordering() {
+        let mut state = AppState::new(PathBuf::from("/test"));
+        assert_eq!(state.max_path_width(), 0, "empty tree has no paths");
+
+        state.build_tree(make_scan_output());
+        // Scan root /test is stripped, leaving "my-app/node_modules" (19) and
+        // "my-app/.next" (12).
+        assert_eq!(state.max_path_width(), "my-app/node_modules".len());
+
+        // order_tree reshuffles the same paths, so the width is unchanged. If this has to
+        // be recomputed, the render loop is doing it every frame.
+        state.order_tree(OrderBy::SizeDesc);
+        assert_eq!(state.max_path_width(), "my-app/node_modules".len());
     }
 
     #[test]
