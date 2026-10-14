@@ -10,6 +10,19 @@ use crate::config;
 
 const SKIP_DIRS: &[&str] = &[".git", ".svn", ".hg"];
 
+/// Whether pass 1 drops this entry entirely — neither counted nor descended into.
+///
+/// VCS names are skipped regardless of entry type because a git worktree has a `.git`
+/// *file*, not a directory. Target directories are skipped only as directories: a file
+/// that happens to be named `node_modules` is not one, and hiding it would be a bug.
+///
+/// Applied in two places on purpose. The walker's `descend` predicate is what refuses to
+/// traverse, but it runs on directories only and it still emits the entry; reapplying this
+/// in the consumer is what reproduces walkdir's `filter_entry`, which dropped the entry.
+fn is_pruned(name: &str, is_dir: bool) -> bool {
+    SKIP_DIRS.contains(&name) || (is_dir && config::is_any_target(name))
+}
+
 #[derive(Debug, Clone)]
 pub struct ScannedDir {
     pub path: PathBuf,
@@ -74,21 +87,29 @@ pub fn scan(base_path: &Path) -> ScanOutput {
     let t0 = Instant::now();
 
     // Pass 1: Walk tree to find detection files.
-    // filter_entry skips entering known target dirs and VCS dirs entirely.
-    let pruned = std::cell::Cell::new(0u64);
-    let walk = WalkDir::new(base_path)
-        .follow_links(false)
-        .into_iter()
-        .filter_entry(|e| {
-            let name = e.file_name().to_string_lossy();
-            let skip = SKIP_DIRS.contains(&name.as_ref())
-                || (e.file_type().is_dir() && config::is_any_target(name.as_ref()));
-            if skip {
-                pruned.set(pruned.get() + 1);
-            }
-            !skip
-        });
+    //
+    // dua-core walks directory reads across a work-stealing pool instead of one thread.
+    // skip_metadata is not optional here: pass 1 only uses file_name, file_type and
+    // path().parent(), so collecting metadata would add a stat per entry that walkdir
+    // never made.
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    let walk = dua_core::walk(
+        base_path,
+        threads,
+        dua_core::Order::ParentFirst,
+        dua_core::Options::default().skip_metadata(),
+        |entry: &dua_core::Entry| {
+            !is_pruned(&entry.file_name.to_string_lossy(), entry.file_type.is_dir())
+        },
+    );
 
+    // dua yields a directory whose descend returned false, where walkdir's filter_entry
+    // dropped it entirely. Filtering here as well keeps discovery_dirs, discovery_files
+    // and pruned_subtrees exactly as they were, which is what makes the benchmark counter
+    // table comparable across the rewrite.
+    let mut pruned = 0u64;
     for entry in walk {
         let entry = match entry {
             Ok(e) => e,
@@ -98,16 +119,20 @@ pub fn scan(base_path: &Path) -> ScanOutput {
             }
         };
 
-        if entry.file_type().is_dir() {
+        let name = entry.file_name.to_string_lossy();
+        if is_pruned(&name, entry.file_type.is_dir()) {
+            pruned += 1;
+            continue;
+        }
+
+        if entry.file_type.is_dir() {
             stats.discovery_dirs += 1;
         } else {
             stats.discovery_files += 1;
         }
 
-        let file_name = entry.file_name().to_string_lossy().to_string();
-
-        if entry.file_type().is_file()
-            && let Some(lang) = config::is_detection_file(&file_name)
+        if entry.file_type.is_file()
+            && let Some(lang) = config::is_detection_file(&name)
             && let Some(parent) = entry.path().parent()
         {
             stats.detection_hits += 1;
@@ -118,7 +143,7 @@ pub fn scan(base_path: &Path) -> ScanOutput {
         }
     }
 
-    stats.pruned_subtrees = pruned.get();
+    stats.pruned_subtrees = pruned;
     stats.pass1_us = t0.elapsed().as_micros() as u64;
 
     // Build projects
@@ -382,6 +407,29 @@ mod tests {
         // Root + my-app are entered; node_modules is not.
         assert_eq!(output.stats.discovery_dirs, 2);
         assert_eq!(output.stats.discovery_files, 1);
+    }
+
+    /// A git worktree has a `.git` *file*, not a directory.
+    ///
+    /// The walker's `descend` predicate only ever sees directories, so a `.git` file is
+    /// never offered to it and would otherwise be counted as discovered. walkdir's
+    /// `filter_entry` pruned it regardless of type; this pins the consumer filter that
+    /// restores that.
+    #[test]
+    fn test_scan_prunes_git_worktree_file() {
+        let dir = create_test_dir();
+        let project = dir.path().join("wt");
+        create_file(&project.join(".git"), 32);
+        create_file(&project.join("package.json"), 10);
+
+        let output = scan(dir.path());
+
+        assert_eq!(output.stats.discovery_dirs, 2, "root + wt");
+        assert_eq!(
+            output.stats.discovery_files, 1,
+            "package.json only — the .git file must be dropped, not discovered"
+        );
+        assert_eq!(output.stats.pruned_subtrees, 1);
     }
 
     #[test]
