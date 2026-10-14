@@ -13,10 +13,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - `ScanStats` work counters on `ScanOutput` (directories entered, files seen, subtrees pruned, detection hits) for machine-independent before/after comparison
 - CI `Bench` step (`cargo bench --bench scan --no-run`) so the harness cannot silently rot
 - Pre-rewrite benchmark baseline recorded in `bench/BASELINE.md`, with machine-readable numbers in `bench/baseline.json`
+- Per-phase timing on `ScanStats` (`pass1_us`, `project_build_us`, `pass2_us`) and a benchmark table splitting `scan` across its three phases, so a parallel walker can be aimed at the pass that dominates
+- `size_par` benchmark group measuring the parallel size fan-out, kept alongside the sequential `size` group so the speedup is measured within a single run
+- Test asserting hidden files inside a target dir count toward its size — guards against walkers that skip dotfiles by default, which would otherwise underreport silently
 
 ### Changed
 - CI clippy now lints all targets (`--all-targets`), covering benches
 - `[profile.bench]` sets `opt-level = 3`, overriding the release `-z`, so benchmarks isolate algorithmic change from optimizer behaviour
+- `build_tree` indexes target dirs in a `HashMap` once instead of rescanning them per project, taking it from O(projects × targets) to O(projects + targets)
+- The size worker fans target walks out across rayon rather than walking every target sequentially on one thread; results still stream per target so the UI fills in progressively
+- Benchmark comparison uses `--baseline-lenient` instead of `--baseline`, so adding a benchmark group no longer breaks every subsequent comparison
+
+### Performance
+- `pipeline/many-tiny` 34.76 ms → 14.74 ms (−57.6%), driven by `build_tree/many-tiny` 20.11 ms → 0.44 ms (−97.8%)
+- `pipeline/deep-nesting` 4.50 ms → 3.62 ms (−19.6%)
+- Size computation 3.4–6.0× faster depending on target count, measured within a single run against the sequential control
 
 ## [0.3.0] - 2026-07-01
 

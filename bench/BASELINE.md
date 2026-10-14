@@ -297,7 +297,7 @@ pruned rather than walked. Sizing still visits all 753 — hence `size` at
 
 ```bash
 git checkout <update-branch>
-cargo bench --bench scan -- --baseline before
+cargo bench --bench scan -- --baseline-lenient before
 ```
 
 Criterion prints a significance test per benchmark — `regressed`, `improved` or
@@ -320,3 +320,82 @@ Things to watch for:
 - **`size/*` is unaffected by a `build_tree` fix** — it is a different phase on
   a different thread. Use it as a control: if `size` also "improves", that part
   is drift.
+- **`size/*` is sequential by design; `size_par/*` is the parallel fan-out.**
+  They run in the same session, so `size / size_par` is a drift-immune measure
+  of the rayon speedup — far more trustworthy than either against a baseline
+  recorded in another session.
+
+---
+
+## Rewrite progress
+
+Measured against the baseline above, each phase run back-to-back in one session
+with `--baseline-lenient before`.
+
+### Phase A — per-phase timing (`pass1_us` / `project_build_us` / `pass2_us`)
+
+Not a performance change; instrumentation. `scan` divides into:
+
+| scenario | pass 1 (walker) | build | pass 2 (read_dir) | **pass 1 % of `scan`** |
+|---|---|---|---|---|
+| node-monorepo | 330 us | 12 us | 221 us | 58.6% |
+| multi-lang | 339 us | 4 us | 254 us | 56.8% |
+| many-tiny | 7,858 us | 167 us | 5,401 us | 58.5% |
+| deep-nesting | 1,918 us | 132 us | 1,166 us | 59.6% |
+| dense-targets | 53 us | 0 us | 28 us | 65.4% |
+
+Pass 1 is 57–65% of `scan` everywhere, so a parallel walker targets the
+majority of the scan. The three marks sum to 95–100% of `scan`, and adding them
+moved every benchmark by at most 2%.
+
+### Phase B — `build_tree` indexed lookup
+
+`HashMap<PathBuf, &ScannedDir>` built once, children looked up instead of
+rescanning `target_dirs` per project: O(projects × targets) → O(projects + targets).
+
+| benchmark | before | after | change |
+|---|---|---|---|
+| `build_tree/many-tiny` | 20.110 ms | 0.440 ms | **−97.8%** |
+| `build_tree/deep-nesting` | 0.980 ms | 0.101 ms | −89.7% |
+| `build_tree/node-monorepo` | 0.0457 ms | 0.0188 ms | −58.8% |
+| `build_tree/multi-lang` | 0.0193 ms | 0.0133 ms | −31.1% |
+| `build_tree/dense-targets` | 0.0015 ms | 0.0019 ms | +25.4% |
+| **`pipeline/many-tiny`** | **34.758 ms** | **14.745 ms** | **−57.6%** |
+| `pipeline/deep-nesting` | 4.505 ms | 3.624 ms | −19.6% |
+
+`dense-targets` regresses because hashing beats scanning nine elements by less
+than building the map costs — 1.9 us, irrelevant.
+
+Attribution is exact: `deep-nesting` pipeline fell 889 us while its `build_tree`
+fell 870 us. `scan`, `size` and `render` all stayed within 3% and the work
+counters were byte-identical.
+
+### Phase C — rayon size worker
+
+`target_paths.into_par_iter()` replacing the sequential loop in `main.rs`, plus
+a `size_par` benchmark group so the harness actually exercises the parallel path.
+
+| scenario | sequential | parallel | speedup |
+|---|---|---|---|
+| many-tiny (500 targets) | 22.712 ms | 3.793 ms | **5.99×** |
+| deep-nesting (110) | 5.214 ms | 0.969 ms | **5.38×** |
+| node-monorepo (22) | 2.726 ms | 0.650 ms | **4.19×** |
+| multi-lang (20) | 0.920 ms | 0.267 ms | **3.44×** |
+| dense-targets (3) | 10.842 ms | 7.669 ms | 1.41× |
+
+These are **within a single run**, so drift cannot explain them. Speedup tracks
+target count up to ~6×, which is this machine's physical core count — the
+ceiling is task availability, not the thread pool. `dense-targets` has only
+three targets, so three-way is the most it can reach and load imbalance on the
+largest tree pulls it to 1.41×.
+
+The sequential control held at −1.7% to +1.1% against the recorded baseline,
+confirming the gain is rayon rather than the clock.
+
+### Summary
+
+| phase | moves | controls held |
+|---|---|---|
+| A instrumentation | nothing (by design) | all benchmarks within 2% |
+| B `build_tree` index | `pipeline/many-tiny` −57.6% | `scan`, `size`, `render` within 3% |
+| C rayon size | `size` 3.4–6.0× faster | `pipeline`, `scan`, `build_tree` unchanged |
