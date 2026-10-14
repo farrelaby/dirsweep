@@ -606,7 +606,7 @@ mod tests {
         ScanOutput {
             target_dirs: dirs,
             projects: vec![project],
-            errors: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -633,7 +633,7 @@ mod tests {
         let output = ScanOutput {
             target_dirs: vec![],
             projects: vec![project],
-            errors: Vec::new(),
+            ..Default::default()
         };
 
         let mut state = AppState::new(PathBuf::from("/test"));

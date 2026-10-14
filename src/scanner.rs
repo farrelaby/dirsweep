@@ -26,26 +26,54 @@ pub struct ProjectInfo {
     pub children: Vec<PathBuf>,
 }
 
-#[derive(Debug, Default)]
+/// Counters describing how much work a scan actually performed.
+///
+/// Wall-clock time on a loaded machine is noisy; the amount of work done is
+/// not. Comparing these across a rewrite tells you whether a speedup came
+/// from doing genuinely less work or from something incidental.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScanStats {
+    /// Directories entered during discovery (pass 1).
+    pub discovery_dirs: u64,
+    /// Files seen during discovery (pass 1).
+    pub discovery_files: u64,
+    /// Subtrees pruned by `filter_entry` (VCS dirs and already-known targets).
+    pub pruned_subtrees: u64,
+    /// Detection files matched (lock files, manifests, etc).
+    pub detection_hits: u64,
+    /// Directories opened while searching for targets (pass 2).
+    pub target_walk_dirs: u64,
+    /// Target directories ultimately claimed.
+    pub target_dirs_found: u64,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct ScanOutput {
     pub target_dirs: Vec<ScannedDir>,
     pub projects: Vec<ProjectInfo>,
     pub errors: Vec<String>,
+    pub stats: ScanStats,
 }
 
 pub fn scan(base_path: &Path) -> ScanOutput {
     let mut detection_files: HashMap<PathBuf, Vec<&str>> = HashMap::new();
     let mut errors: Vec<String> = Vec::new();
+    let mut stats = ScanStats::default();
 
     // Pass 1: Walk tree to find detection files.
     // filter_entry skips entering known target dirs and VCS dirs entirely.
+    let pruned = std::cell::Cell::new(0u64);
     let walk = WalkDir::new(base_path)
         .follow_links(false)
         .into_iter()
         .filter_entry(|e| {
             let name = e.file_name().to_string_lossy();
-            !(SKIP_DIRS.contains(&name.as_ref())
-                || e.file_type().is_dir() && config::is_any_target(name.as_ref()))
+            let skip = SKIP_DIRS.contains(&name.as_ref())
+                || (e.file_type().is_dir() && config::is_any_target(name.as_ref()));
+            if skip {
+                pruned.set(pruned.get() + 1);
+            }
+            !skip
         });
 
     for entry in walk {
@@ -57,18 +85,27 @@ pub fn scan(base_path: &Path) -> ScanOutput {
             }
         };
 
+        if entry.file_type().is_dir() {
+            stats.discovery_dirs += 1;
+        } else {
+            stats.discovery_files += 1;
+        }
+
         let file_name = entry.file_name().to_string_lossy().to_string();
 
         if entry.file_type().is_file()
             && let Some(lang) = config::is_detection_file(&file_name)
             && let Some(parent) = entry.path().parent()
         {
+            stats.detection_hits += 1;
             detection_files
                 .entry(parent.to_path_buf())
                 .or_default()
                 .push(lang);
         }
     }
+
+    stats.pruned_subtrees = pruned.get();
 
     // Build projects
     let mut projects: Vec<ProjectInfo> = detection_files
@@ -117,6 +154,7 @@ pub fn scan(base_path: &Path) -> ScanOutput {
                 false,
                 &mut found,
                 &mut errors,
+                &mut stats,
             );
         }
 
@@ -128,6 +166,7 @@ pub fn scan(base_path: &Path) -> ScanOutput {
                 true,
                 &mut found,
                 &mut errors,
+                &mut stats,
             );
         }
 
@@ -146,10 +185,13 @@ pub fn scan(base_path: &Path) -> ScanOutput {
         claimed_projects.insert(project.path.clone());
     }
 
+    stats.target_dirs_found = target_dirs.len() as u64;
+
     ScanOutput {
         target_dirs,
         projects,
         errors,
+        stats,
     }
 }
 
@@ -163,7 +205,10 @@ fn find_target_dirs(
     recurse: bool,
     results: &mut Vec<PathBuf>,
     errors: &mut Vec<String>,
+    stats: &mut ScanStats,
 ) {
+    stats.target_walk_dirs += 1;
+
     let top_level = match fs::read_dir(dir) {
         Ok(rd) => rd,
         Err(e) => {
@@ -197,6 +242,7 @@ fn find_target_dirs(
                 recurse,
                 results,
                 errors,
+                stats,
             );
         }
     }
@@ -298,6 +344,25 @@ mod tests {
         assert_eq!(output.target_dirs.len(), 1);
         assert_eq!(output.target_dirs[0].path, project.join("node_modules"));
         assert_eq!(output.target_dirs[0].size, 0);
+    }
+
+    #[test]
+    fn test_scan_stats_counts_work() {
+        let dir = create_test_dir();
+        let project = dir.path().join("my-app");
+        create_file(&project.join("package-lock.json"), 50);
+        create_dir(&project.join("node_modules"));
+        create_file(&project.join("node_modules/pkg/index.js"), 1024);
+
+        let output = scan(dir.path());
+
+        assert_eq!(output.stats.detection_hits, 1);
+        assert_eq!(output.stats.target_dirs_found, 1);
+        // node_modules is pruned, so it is counted as pruned and never walked.
+        assert!(output.stats.pruned_subtrees >= 1);
+        // Root + my-app are entered; node_modules is not.
+        assert_eq!(output.stats.discovery_dirs, 2);
+        assert_eq!(output.stats.discovery_files, 1);
     }
 
     #[test]
