@@ -25,7 +25,22 @@ ureq = { version = "2", features = ["json"] }
 walkdir = "2.5.0"
 
 [dev-dependencies]
+criterion = { version = "0.8", features = ["html_reports"] }
 tempfile = "3.27.0"
+
+[[bench]]
+name = "scan"
+harness = false
+
+# Benches inherit from [profile.release] but override opt-level: the shipped
+# binary is size-optimised (-z), which would obscure algorithmic changes in a
+# core rewrite. Both the baseline and the rewrite are measured under this same
+# profile, so the comparison stays consistent.
+#
+# Cargo ignores `panic` for the bench profile — benches always unwind, so the
+# release `panic = "abort"` does not carry over here.
+[profile.bench]
+opt-level = 3
 
 [profile.release]
 lto = "thin"
