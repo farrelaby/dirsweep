@@ -1,0 +1,210 @@
+{
+  "schema": "dirsweep-scan-bench/1",
+  "recorded": "2026-10-14",
+  "baseline_name": "before",
+  "commit": "cffe51b0a0a93351b58141b5ab4093e9f2d6bd55",
+  "profile": {
+    "opt-level": 3,
+    "lto": "thin",
+    "codegen-units": 1
+  },
+  "toolchain": {
+    "rustc": "rustc 1.95.0 (59807616e 2026-04-14)"
+  },
+  "deps": {
+    "criterion": "0.8.2",
+    "walkdir": "2.5.0",
+    "ratatui": "0.30.2",
+    "chrono": "0.4.45"
+  },
+  "machine": {
+    "cpu": "AMD Ryzen 5 PRO 4650U (6C/12T)",
+    "ram_gb": 14,
+    "os": "Fedora Linux 44",
+    "kernel": "7.2.9-201.fc44.x86_64",
+    "fs": "btrfs",
+    "governor": "schedutil"
+  },
+  "method": {
+    "samples": 100,
+    "warmup_s": 3,
+    "measurement_s": 5,
+    "statistic": "mean",
+    "unit": "seconds"
+  },
+  "machine_drift_note": "Two runs of identical code differed by ~1.87x (uniform across phases). Save the baseline and run the comparison back to back in the same session.",
+  "machine_drift_evidence": {
+    "pipeline/many-tiny": {
+      "run1_ms": 64.917,
+      "run2_ms": 34.7584,
+      "ratio": 1.8677
+    },
+    "pipeline/deep-nesting": {
+      "run1_ms": 8.551,
+      "run2_ms": 4.5048,
+      "ratio": 1.8982
+    },
+    "pipeline/node-monorepo": {
+      "run1_ms": 1.572,
+      "run2_ms": 0.829,
+      "ratio": 1.8962
+    },
+    "scan/many-tiny": {
+      "run1_ms": 25.172,
+      "run2_ms": 13.5927,
+      "ratio": 1.8519
+    },
+    "size/many-tiny": {
+      "run1_ms": 42.134,
+      "run2_ms": 22.4623,
+      "ratio": 1.8758
+    },
+    "render/many-tiny": {
+      "run1_ms": 0.7104,
+      "run2_ms": 0.372,
+      "ratio": 1.9099
+    },
+    "render/dense-targets": {
+      "run1_ms": 0.2166,
+      "run2_ms": 0.1126,
+      "ratio": 1.9236
+    }
+  },
+  "results": {
+    "pipeline": {
+      "node-monorepo": {
+        "mean_s": 0.0008290333525412163,
+        "ci_low_s": 0.0008247748318786876,
+        "ci_high_s": 0.0008347813621779781
+      },
+      "multi-lang": {
+        "mean_s": 0.0008194885198872607,
+        "ci_low_s": 0.0008180577007963275,
+        "ci_high_s": 0.0008210000073285441
+      },
+      "many-tiny": {
+        "mean_s": 0.034758383340000004,
+        "ci_low_s": 0.034677033859875,
+        "ci_high_s": 0.03484642741775
+      },
+      "deep-nesting": {
+        "mean_s": 0.004504833785454544,
+        "ci_low_s": 0.0044925724563636355,
+        "ci_high_s": 0.004520216040999999
+      },
+      "dense-targets": {
+        "mean_s": 0.00020443574266464304,
+        "ci_low_s": 0.00020406462747330585,
+        "ci_high_s": 0.00020486557865444195
+      }
+    },
+    "scan": {
+      "node-monorepo": {
+        "mean_s": 0.000567156690449191,
+        "ci_low_s": 0.0005662056829634856,
+        "ci_high_s": 0.0005681859374680161
+      },
+      "multi-lang": {
+        "mean_s": 0.0006009173456595486,
+        "ci_low_s": 0.0005993117178467713,
+        "ci_high_s": 0.0006027600933837683
+      },
+      "many-tiny": {
+        "mean_s": 0.013592650432499999,
+        "ci_low_s": 0.013538701925,
+        "ci_high_s": 0.013649347197
+      },
+      "deep-nesting": {
+        "mean_s": 0.003187694836875,
+        "ci_low_s": 0.0031777905283750002,
+        "ci_high_s": 0.003200665595109375
+      },
+      "dense-targets": {
+        "mean_s": 8.510722943085453e-05,
+        "ci_low_s": 8.479979539567296e-05,
+        "ci_high_s": 8.545022134764085e-05
+      }
+    },
+    "build_tree": {
+      "node-monorepo": {
+        "mean_s": 4.5661649802393875e-05,
+        "ci_low_s": 4.5525573986061984e-05,
+        "ci_high_s": 4.5860164267161754e-05
+      },
+      "multi-lang": {
+        "mean_s": 1.929721797616307e-05,
+        "ci_low_s": 1.9252110437288097e-05,
+        "ci_high_s": 1.9348172015835666e-05
+      },
+      "many-tiny": {
+        "mean_s": 0.02010961517666667,
+        "ci_low_s": 0.020053846712666662,
+        "ci_high_s": 0.02017126014766667
+      },
+      "deep-nesting": {
+        "mean_s": 0.0009797796149747695,
+        "ci_low_s": 0.000977958118559815,
+        "ci_high_s": 0.00098190353664197
+      },
+      "dense-targets": {
+        "mean_s": 1.5154683942956637e-06,
+        "ci_low_s": 1.5075418854483006e-06,
+        "ci_high_s": 1.5238360604743019e-06
+      }
+    },
+    "size": {
+      "node-monorepo": {
+        "mean_s": 0.002735514793157895,
+        "ci_low_s": 0.0027280820304999994,
+        "ci_high_s": 0.0027435658687631577
+      },
+      "multi-lang": {
+        "mean_s": 0.0009185479808832807,
+        "ci_low_s": 0.000917283331419227,
+        "ci_high_s": 0.0009198766521306001
+      },
+      "many-tiny": {
+        "mean_s": 0.02246233805333332,
+        "ci_low_s": 0.022425651071166678,
+        "ci_high_s": 0.022504508315166673
+      },
+      "deep-nesting": {
+        "mean_s": 0.005247109739000002,
+        "ci_low_s": 0.005230690418650002,
+        "ci_high_s": 0.005263798284175001
+      },
+      "dense-targets": {
+        "mean_s": 0.011027285521999998,
+        "ci_low_s": 0.01101077721675,
+        "ci_high_s": 0.01104815272225
+      }
+    },
+    "render": {
+      "node-monorepo": {
+        "mean_s": 0.00020724719556882142,
+        "ci_low_s": 0.00020684232649713436,
+        "ci_high_s": 0.00020770857724480753
+      },
+      "multi-lang": {
+        "mean_s": 0.0001876264852482521,
+        "ci_low_s": 0.00018720738812490927,
+        "ci_high_s": 0.00018806991117657892
+      },
+      "many-tiny": {
+        "mean_s": 0.000371963186155468,
+        "ci_low_s": 0.000367540900010269,
+        "ci_high_s": 0.00037916558933604166
+      },
+      "deep-nesting": {
+        "mean_s": 0.00025925238754668004,
+        "ci_low_s": 0.0002584131595908402,
+        "ci_high_s": 0.0002602083310454472
+      },
+      "dense-targets": {
+        "mean_s": 0.00011259533364337705,
+        "ci_low_s": 0.00011230203798706083,
+        "ci_high_s": 0.00011293284225569387
+      }
+    }
+  }
+}

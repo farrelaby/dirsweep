@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Added
+- Criterion benchmark harness (`benches/scan.rs`) timing the scan core phase by phase: `pipeline`, `scan`, `build_tree`, `size`, `render`
+- Deterministic seeded fixture generator for benchmarks, replacing the non-deterministic `$RANDOM` fixtures in `bench/bench.sh`
+- Size-computation benchmark, replicating the worker loop in `main.rs` — previously unmeasured, as the TUI discards it before it completes
+- `ScanStats` work counters on `ScanOutput` (directories entered, files seen, subtrees pruned, detection hits) for machine-independent before/after comparison
+- CI `Bench` step (`cargo bench --bench scan --no-run`) so the harness cannot silently rot
+- Pre-rewrite benchmark baseline recorded in `bench/BASELINE.md`, with machine-readable numbers in `bench/baseline.json`
+
+### Changed
+- CI clippy now lints all targets (`--all-targets`), covering benches
+- `[profile.bench]` sets `opt-level = 3`, overriding the release `-z`, so benchmarks isolate algorithmic change from optimizer behaviour
+
 ## [0.3.0] - 2026-07-01
 
 ### Added
