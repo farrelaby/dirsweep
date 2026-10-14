@@ -23,12 +23,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - `build_tree` indexes target dirs in a `HashMap` once instead of rescanning them per project, taking it from O(projects × targets) to O(projects + targets)
 - The size worker fans target walks out across rayon rather than walking every target sequentially on one thread; results still stream per target so the UI fills in progressively
 - Benchmark comparison uses `--baseline-lenient` instead of `--baseline`, so adding a benchmark group no longer breaks every subsequent comparison
+- Pass 1 walks with `dua-core` across a work-stealing pool instead of one sequential `walkdir` traversal; the predicate still prunes VCS and target dirs, and entries are filtered in the consumer so work counters stay identical to before
+- `max_path_width` is cached on `AppState` and refreshed when the tree changes, rather than being rederived from every target on each frame
 
 ### Performance
-- `pipeline/many-tiny` 34.76 ms → 14.74 ms (−57.6%), driven by `build_tree/many-tiny` 20.11 ms → 0.44 ms (−97.8%)
-- `pipeline/deep-nesting` 4.50 ms → 3.62 ms (−19.6%)
+- `pipeline/many-tiny` 34.76 ms → 9.43 ms (−72.9%, 3.7×), in two independent steps: `build_tree` 20.11 ms → 0.44 ms (−97.8%), then pass 1 across dua-core's pool 13.65 ms → 8.57 ms (−37%)
+- `pipeline/deep-nesting` 4.50 ms → 3.01 ms (−33.2%)
 - Size computation 3.4–6.0× faster depending on target count, measured within a single run against the sequential control
 - `render/many-tiny` 366.75 µs → 202.10 µs (−45%) and `render/deep-nesting` 259.25 µs → 221.40 µs (−14%), from caching the maximum path width instead of deriving it from the whole tree on every frame
+- Trade-off from the walker: spawning its pool costs a fixed ~350 µs, so small trees regress — `pipeline/dense-targets` 205 µs → 752 µs, `pipeline/node-monorepo` 804 µs → 1236 µs, `pipeline/multi-lang` 821 µs → 1213 µs. Break-even is roughly 50–80 directories and every regression stays sub-millisecond in absolute terms
 
 ## [0.3.0] - 2026-07-01
 

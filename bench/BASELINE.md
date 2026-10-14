@@ -392,6 +392,51 @@ largest tree pulls it to 1.41×.
 The sequential control held at −1.7% to +1.1% against the recorded baseline,
 confirming the gain is rayon rather than the clock.
 
+### Phase D — `dua-core` walk for pass 1
+
+`dua-core` 4.2.0 replaces the sequential `walkdir` traversal in pass 1, spreading
+directory reads across a crossbeam work-stealing pool. `walkdir` stays for
+`scan_target`, which runs *inside* the rayon size fan-out — a nested `dua` pool
+there would mean up to 144 threads on one disk.
+
+| benchmark | before | after | change |
+|---|---|---|---|
+| `scan/many-tiny` | 13.65 ms | 8.57 ms | **−37.2%** |
+| `pipeline/many-tiny` | 14.74 ms | 9.43 ms | **−36.0%** |
+| `scan/deep-nesting` | 3.22 ms | 2.47 ms | −23.2% |
+| `pipeline/deep-nesting` | 3.62 ms | 3.01 ms | −16.8% |
+| `pipeline/node-monorepo` | 804 µs | 1236 µs | +53.8% |
+| `pipeline/multi-lang` | 821 µs | 1213 µs | +47.7% |
+| `pipeline/dense-targets` | 205 µs | 752 µs | **+267.2%** |
+
+**Work counters came back byte-identical on all five fixtures.** `dua` emits a
+directory after `descend` refuses it, where `walkdir`'s `filter_entry` dropped it
+entirely; reapplying the predicate in the consumer restores that. Without this the
+comparison would be meaningless — the counters are the drift-independent signal.
+
+**The regressions are one fixed cost, not a scaling problem.** Spawning the pool
+is ~28 µs per thread and `available_parallelism()` returns 12 on this 6C/12T
+machine, so every walk pays ~350 µs before reading a single directory:
+
+| scenario | dirs | pass 1 before → after | net |
+|---|---|---|---|
+| many-tiny | 500 | 7888 → 2836 µs | −5052 µs |
+| deep-nesting | 110 | 1882 → 1011 µs | −871 µs |
+| node-monorepo | 22 | 337 → 665 µs | +328 µs |
+| multi-lang | 20 | 331 → 662 µs | +331 µs |
+| dense-targets | 3 | 54 → 580 µs | +526 µs |
+
+The twelve hyperthreads bought nothing. At six threads four of the five scenarios
+improved and `deep-nesting` got *faster* than it was at twelve — −30.6% against
+walkdir versus −23.2% — from reduced contention. The cap was reverted regardless:
+`min(6)` would wrongly limit a 32-core machine, and obtaining physical core count
+portably needs `num_cpus` or platform-specific code, which is a separate decision
+from adopting a walker.
+
+Break-even sits at roughly 50–80 directories. Every regression is sub-millisecond
+in absolute terms, while both wins are on trees large enough to scale past the
+fixtures, whose largest is 500 directories.
+
 ### Summary
 
 | phase | moves | controls held |
@@ -399,6 +444,7 @@ confirming the gain is rayon rather than the clock.
 | A instrumentation | nothing (by design) | all benchmarks within 2% |
 | B `build_tree` index | `pipeline/many-tiny` −57.6% | `scan`, `size`, `render` within 3% |
 | C rayon size | `size` 3.4–6.0× faster | `pipeline`, `scan`, `build_tree` unchanged |
+| D `dua-core` pass 1 | `pipeline/many-tiny` −36.0% | work counters byte-identical, `size` within 1.2% |
 
 ### Measurement stability
 
