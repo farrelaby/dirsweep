@@ -14,8 +14,13 @@
 //!
 //! ```text
 //! git checkout main        && cargo bench -- --save-baseline before
-//! git checkout <rewrite>   && cargo bench -- --baseline before
+//! git checkout <rewrite>   && cargo bench -- --baseline-lenient before
 //! ```
+//!
+//! `--baseline-lenient` rather than `--baseline` on purpose: the strict form
+//! panics the whole run if *any* benchmark is missing from the named baseline,
+//! so adding a group (as `size_par` was added) would break every subsequent
+//! comparison. Lenient compares what exists and skips only what does not.
 //!
 //! Criterion prints a per-benchmark significance test (regressed / improved /
 //! no change) rather than a raw percentage.
@@ -32,6 +37,7 @@ use std::path::PathBuf;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput};
 use ratatui::{Terminal, backend::TestBackend};
+use rayon::prelude::*;
 
 use dirsweep::app::{AppPhase, AppState};
 use dirsweep::scanner;
@@ -118,11 +124,14 @@ fn bench_build_tree(c: &mut Criterion, fixtures: &[Fixture]) {
     group.finish();
 }
 
-/// Size computation, replicated from the worker loop in `main.rs`.
+/// Total sequential work to size every target.
 ///
-/// That loop is private to `main.rs`, so it cannot be called directly. This
-/// mirrors it exactly: walk every target in turn, summing file sizes. If the
-/// rewrite parallelises the size walk, this is where it shows up.
+/// The size worker in `main.rs` fans this out across rayon, so this is no
+/// longer what the user waits for — it is the *control*. Kept sequential on
+/// purpose: `scan_target_size` itself did not change, so this should stay flat
+/// across the rewrite and expose machine drift, while `size_par` moves.
+///
+/// Private to `main.rs`, so it cannot be called directly; this mirrors it.
 fn bench_size(c: &mut Criterion, fixtures: &[Fixture]) {
     let mut group = c.benchmark_group("size");
 
@@ -145,6 +154,50 @@ fn bench_size(c: &mut Criterion, fixtures: &[Fixture]) {
                             total += size;
                         }
                     }
+                    black_box(total)
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+/// Time to compute *every* size, fanned out across rayon — the number the user
+/// actually waits on, since the TUI fills in sizes as they arrive.
+///
+/// Deliberately measured alongside the sequential `size` group rather than
+/// replacing it: running both in the same session gives the parallel speedup
+/// directly, immune to the ~1.9x clock drift this machine shows *between*
+/// sessions. Rayon's pool is process-wide and persists across criterion's
+/// iterations, so per-iteration cost is stable.
+///
+/// The per-target channel send in `main.rs` is not mirrored — it needs a
+/// draining receiver to model, and the cost is a single unbounded mpsc send per
+/// target, which is not what this group is trying to measure.
+fn bench_size_parallel(c: &mut Criterion, fixtures: &[Fixture]) {
+    let mut group = c.benchmark_group("size_par");
+
+    for f in fixtures {
+        let targets: Vec<PathBuf> = scanner::scan(&f.dir)
+            .target_dirs
+            .iter()
+            .map(|d| d.path.clone())
+            .collect();
+
+        group.throughput(Throughput::Elements(targets.len() as u64));
+        group.bench_with_input(
+            BenchmarkId::from_parameter(f.name),
+            &targets,
+            |b, targets| {
+                b.iter(|| {
+                    let total: u64 = targets
+                        .par_iter()
+                        .map(|path| match scanner::scan_target_size(black_box(path)) {
+                            Ok((size, _)) => size,
+                            Err(_) => 0,
+                        })
+                        .sum();
                     black_box(total)
                 });
             },
@@ -295,6 +348,7 @@ fn main() {
     bench_scan(&mut criterion, &built);
     bench_build_tree(&mut criterion, &built);
     bench_size(&mut criterion, &built);
+    bench_size_parallel(&mut criterion, &built);
     bench_render(&mut criterion, &built);
 
     criterion.final_summary();
