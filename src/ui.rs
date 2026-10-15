@@ -190,10 +190,17 @@ fn render_browsing(state: &mut AppState, frame: &mut Frame, area: Rect) {
     // Overhead: highlight(2) + prefix(3) + checkbox(3) + spaces(3) + max_size(8) + max_time(12) + margin(2)
     let use_alignment = max_path_width + 33 <= area.width as usize;
 
-    let items: Vec<ListItem> = slice
-        .iter()
-        .enumerate()
-        .map(|(i, entry)| match entry {
+    let mut items: Vec<ListItem> = Vec::new();
+    let mut selected_row = 0;
+
+    for (i, entry) in slice.iter().enumerate() {
+        // Blank row between project groups. Skipped on the first visible row:
+        // if the viewport starts on a header, a spacer above it wastes a line.
+        if i > 0 && matches!(entry, TreeEntry::ProjectHeader { .. }) {
+            items.push(ListItem::new(""));
+        }
+
+        let item = match entry {
             TreeEntry::ProjectHeader { name, languages } => {
                 let lang_str = if languages.is_empty() {
                     String::new()
@@ -265,11 +272,18 @@ fn render_browsing(state: &mut AppState, frame: &mut Frame, area: Rect) {
                     ListItem::new(text)
                 }
             }
-        })
-        .collect();
+        };
+
+        // Track the cursor's row while building: spacers shift rows down, so the
+        // position can no longer be derived as list_index - scroll_offset.
+        if scroll_offset + i == state.list_index {
+            selected_row = items.len();
+        }
+        items.push(item);
+    }
 
     let mut list_state = ListState::default();
-    list_state.select(Some(state.list_index - scroll_offset));
+    list_state.select(Some(selected_row));
 
     let list = List::new(items)
         .block(Block::default())
