@@ -459,7 +459,7 @@ impl AppState {
         self.tree = ordered_groups.into_iter().flatten().collect();
         self.rebuild_target_index();
         self.ordered_by = by;
-        self.list_index = 0;
+        self.list_index = 1; // skip the project header
         self.clamp_index();
     }
 
