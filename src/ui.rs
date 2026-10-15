@@ -192,7 +192,8 @@ fn render_browsing(state: &mut AppState, frame: &mut Frame, area: Rect) {
 
     let items: Vec<ListItem> = slice
         .iter()
-        .map(|entry| match entry {
+        .enumerate()
+        .map(|(i, entry)| match entry {
             TreeEntry::ProjectHeader { name, languages } => {
                 let lang_str = if languages.is_empty() {
                     String::new()
@@ -210,15 +211,20 @@ fn render_browsing(state: &mut AppState, frame: &mut Frame, area: Rect) {
                 path,
                 size,
                 last_modified,
-                is_last,
-                ..
             } => {
                 let checked = if state.selected.contains(path) {
                     "\u{25CF}"
                 } else {
                     " "
                 };
-                let prefix = if *is_last { "\u{2514}" } else { "\u{251C}" };
+                // A target dir is the last child when the entry after it starts a new
+                // project group (or the tree ends). Derived here so the model never has
+                // to store and re-maintain a rendering flag on every tree mutation.
+                let is_last = matches!(
+                    state.tree.get(i + scroll_offset + 1),
+                    None | Some(TreeEntry::ProjectHeader { .. })
+                );
+                let prefix = if is_last { "\u{2514}" } else { "\u{251C}" };
                 let display_path = path.strip_prefix(&state.scan_path).unwrap_or(path);
                 let path_str = display_path.to_string_lossy().to_string();
                 let sized_str = humansize::format_size(*size, humansize::BINARY);

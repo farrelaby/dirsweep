@@ -78,7 +78,6 @@ pub enum TreeEntry {
         path: PathBuf,
         size: u64,
         last_modified: DateTime<Utc>,
-        is_last: bool,
     },
 }
 
@@ -167,16 +166,14 @@ impl AppState {
                 continue;
             }
 
-            let mut subtree: Vec<TreeEntry> = Vec::new();
-            for (i, child) in children.iter().enumerate() {
-                let is_last = i == children.len() - 1;
-                subtree.push(TreeEntry::TargetDir {
+            let subtree: Vec<TreeEntry> = children
+                .iter()
+                .map(|child| TreeEntry::TargetDir {
                     path: child.path.clone(),
                     size: child.size,
                     last_modified: child.last_modified,
-                    is_last,
-                });
-            }
+                })
+                .collect();
 
             tree.push(TreeEntry::ProjectHeader {
                 name: project.name.clone(),
@@ -301,7 +298,6 @@ impl AppState {
                     }
 
                     if !surviving.is_empty() {
-                        fix_is_last(&mut surviving);
                         new_tree.push(header);
                         new_tree.extend(surviving);
                     }
@@ -423,8 +419,6 @@ impl AppState {
                 }
             }
 
-            fix_is_last(&mut children);
-
             let mut full = vec![header];
             full.extend(children);
             ordered_groups.push(full);
@@ -525,17 +519,6 @@ fn group_split(group: Vec<TreeEntry>) -> (TreeEntry, Vec<TreeEntry>) {
     let header = iter.next().expect("group must have a ProjectHeader");
     let children = iter.collect();
     (header, children)
-}
-
-fn fix_is_last(children: &mut [TreeEntry]) {
-    if let Some(TreeEntry::TargetDir { is_last, .. }) = children.last_mut() {
-        *is_last = true;
-    }
-    for entry in children.iter_mut().rev().skip(1) {
-        if let TreeEntry::TargetDir { is_last, .. } = entry {
-            *is_last = false;
-        }
-    }
 }
 
 fn name_order_key(entry: &TreeEntry) -> &std::path::Path {
