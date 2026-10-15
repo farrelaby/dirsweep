@@ -35,7 +35,7 @@ mod palette {
     pub const DELETING: Color = Color::Rgb(255, 220, 80);
 }
 
-pub fn render(state: &mut AppState, frame: &mut Frame) {
+pub fn render(state: &AppState, frame: &mut Frame) {
     frame.render_widget(
         Block::default().style(Style::default().bg(palette::BG)),
         frame.area(),
@@ -80,7 +80,7 @@ fn render_header(state: &AppState, frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(header), area);
 }
 
-fn render_main(state: &mut AppState, frame: &mut Frame, area: Rect) {
+fn render_main(state: &AppState, frame: &mut Frame, area: Rect) {
     match state.phase {
         AppPhase::Scanning => render_scanning(frame, area),
         AppPhase::Browsing => {
@@ -157,7 +157,7 @@ fn render_scanning(frame: &mut Frame, area: Rect) {
     frame.render_widget(text, area);
 }
 
-fn render_browsing(state: &mut AppState, frame: &mut Frame, area: Rect) {
+fn render_browsing(state: &AppState, frame: &mut Frame, area: Rect) {
     if state.tree.is_empty() {
         let text = Paragraph::new(" No sweepable directories found.")
             .style(Style::default().fg(palette::TIME))
