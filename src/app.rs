@@ -63,7 +63,7 @@ impl OrderBy {
             OrderBy::DateAsc => OrderBy::NameDesc,
             OrderBy::DateDesc => OrderBy::DateAsc,
             OrderBy::SizeAsc => OrderBy::DateDesc,
-            OrderBy::SizeDesc => OrderBy::DateAsc,
+            OrderBy::SizeDesc => OrderBy::SizeAsc,
         }
     }
 }
