@@ -878,4 +878,50 @@ mod tests {
         }
         assert_eq!(state.list_index, 1);
     }
+
+    #[test]
+    fn test_prev_is_inverse_of_next() {
+        let variants = [
+            OrderBy::NameAsc,
+            OrderBy::NameDesc,
+            OrderBy::DateAsc,
+            OrderBy::DateDesc,
+            OrderBy::SizeAsc,
+            OrderBy::SizeDesc,
+        ];
+        for v in variants {
+            assert_eq!(
+                v.next().prev(),
+                v,
+                "next().prev() should round-trip for {:?}",
+                v
+            );
+            assert_eq!(
+                v.prev().next(),
+                v,
+                "prev().next() should round-trip for {:?}",
+                v
+            );
+        }
+    }
+
+    #[test]
+    fn test_order_tree_lands_on_target_dir() {
+        let mut state = AppState::new(PathBuf::from("/test"));
+        state.build_tree(make_scan_output());
+        let mut by = state.ordered_by;
+        for _ in 0..6 {
+            by = by.next();
+            state.order_tree(by);
+            assert!(
+                matches!(
+                    state.tree.get(state.list_index),
+                    Some(TreeEntry::TargetDir { .. })
+                ),
+                "order {:?}: cursor at index {} is not on a TargetDir",
+                by,
+                state.list_index,
+            );
+        }
+    }
 }
