@@ -33,6 +33,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - `render/many-tiny` 366.75 µs → 202.10 µs (−45%) and `render/deep-nesting` 259.25 µs → 221.40 µs (−14%), from caching the maximum path width instead of deriving it from the whole tree on every frame
 - Trade-off from the walker: spawning its pool costs a fixed ~350 µs, so small trees regress — `pipeline/dense-targets` 205 µs → 752 µs, `pipeline/node-monorepo` 804 µs → 1236 µs, `pipeline/multi-lang` 821 µs → 1213 µs. Break-even is roughly 50–80 directories and every regression stays sub-millisecond in absolute terms
 
+### Fixed
+- Order-by dialog: pressing Up on the last menu item wrapped two rows instead of one (`SizeDesc` mapped to `DateAsc` instead of `SizeAsc`)
+- Cursor landed on the project header after reordering the tree (reset `list_index` should skip the header, matching `build_tree`)
+
+### Changed
+- Tree list now shows a blank row between project groups for visual separation
+- Last-child glyph (`├`/`└`) is derived during rendering from the tree's ordering instead of being stored as `is_last` on every entry, removing catch-up logic from three mutation paths (`build_tree`, `remove_deleted_from_tree`, `order_tree`)
+- `ui::render` takes `&AppState` instead of `&mut AppState` — rendering no longer mutates state
+
 ## [0.3.0] - 2026-07-01
 
 ### Added
