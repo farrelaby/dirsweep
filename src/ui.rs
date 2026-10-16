@@ -644,3 +644,96 @@ fn render_order_dialog(state: &AppState, frame: &mut Frame, area: Rect) {
 
     frame.render_widget(dialog, dialog_area);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::{Terminal, backend::TestBackend};
+    use std::path::PathBuf;
+
+    fn two_project_output() -> crate::scanner::ScanOutput {
+        use crate::scanner::{ProjectInfo, ScannedDir};
+        use chrono::Utc;
+        let projects = vec![
+            ProjectInfo {
+                path: PathBuf::from("/test/app-a"),
+                name: "app-a".to_string(),
+                languages: vec!["js".to_string()],
+                children: vec![PathBuf::from("/test/app-a/node_modules")],
+            },
+            ProjectInfo {
+                path: PathBuf::from("/test/app-b"),
+                name: "app-b".to_string(),
+                languages: vec!["js".to_string()],
+                children: vec![PathBuf::from("/test/app-b/node_modules")],
+            },
+        ];
+        let dirs = vec![
+            ScannedDir {
+                path: PathBuf::from("/test/app-a/node_modules"),
+                size: 1_000_000,
+                last_modified: Utc::now(),
+                error: None,
+            },
+            ScannedDir {
+                path: PathBuf::from("/test/app-b/node_modules"),
+                size: 2_000_000,
+                last_modified: Utc::now(),
+                error: None,
+            },
+        ];
+        crate::scanner::ScanOutput {
+            target_dirs: dirs,
+            projects,
+            errors: Vec::new(),
+            stats: crate::scanner::ScanStats::default(),
+        }
+    }
+
+    fn row(term: &Terminal<TestBackend>, r: u16) -> String {
+        let buf = term.backend().buffer();
+        (0..buf.area.width)
+            .map(|x| {
+                buf.cell((x, r))
+                    .map(|c| c.symbol().to_string())
+                    .unwrap_or_default()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tree_render_has_spacer_and_glyphs_and_cursor() {
+        let mut state = AppState::new(PathBuf::from("/test"));
+        state.build_tree(two_project_output());
+        state.phase = AppPhase::Browsing;
+        state.list_index = 3;
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+        terminal.draw(|f| render(&state, f)).unwrap();
+
+        let header_b_row = (0..20u16)
+            .find(|&r| row(&terminal, r).contains(" app-b (js) "))
+            .unwrap();
+        let spacer_row = row(&terminal, header_b_row - 1);
+        assert!(
+            spacer_row.trim().is_empty(),
+            "expected blank spacer, got {:?}",
+            spacer_row
+        );
+        let first_dir_row = (0..20u16)
+            .find(|&r| row(&terminal, r).contains("app-a/node_modules"))
+            .unwrap();
+        assert!(
+            row(&terminal, first_dir_row).contains('\u{2514}'),
+            "first group's only child should be last-glyph"
+        );
+        let cursor_rows: Vec<_> = (0..20u16)
+            .filter(|&r| row(&terminal, r).contains('\u{25B6}'))
+            .collect();
+        assert_eq!(
+            cursor_rows.len(),
+            1,
+            "expected exactly one cursor highlight"
+        );
+        assert!(row(&terminal, cursor_rows[0]).contains("app-b/node_modules"));
+    }
+}
