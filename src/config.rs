@@ -24,6 +24,7 @@ pub const LANGUAGES: &[Language] = &[
             "package-lock.json",
             "pnpm-lock.yaml",
             "bun.lock",
+            "bun.lockb",
             "deno.lock",
             "yarn.lock",
         ],
@@ -230,5 +231,13 @@ mod tests {
         std::fs::write(dir.path().join("package-lock.json"), "").unwrap();
         let langs = detect_languages(dir.path());
         assert_eq!(langs, vec!["js", "rust"]);
+    }
+
+    #[test]
+    fn test_detect_languages_bun_lockb() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("bun.lockb"), "").unwrap();
+        let langs = detect_languages(dir.path());
+        assert_eq!(langs, vec!["js"]);
     }
 }

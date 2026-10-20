@@ -16,6 +16,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Per-phase timing on `ScanStats` (`pass1_us`, `project_build_us`, `pass2_us`) and a benchmark table splitting `scan` across its three phases, so a parallel walker can be aimed at the pass that dominates
 - `size_par` benchmark group measuring the parallel size fan-out, kept alongside the sequential `size` group so the speedup is measured within a single run
 - Test asserting hidden files inside a target dir count toward its size — guards against walkers that skip dotfiles by default, which would otherwise underreport silently
+- Recognition of legacy Bun lockfile `bun.lockb` (`config.rs`)
+- Fallback error in `detect_target` for unsupported platforms (`commands.rs`)
 
 ### Changed
 - CI clippy now lints all targets (`--all-targets`), covering benches
@@ -36,6 +38,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 ### Fixed
 - Order-by dialog: pressing Up on the last menu item wrapped two rows instead of one (`SizeDesc` mapped to `DateAsc` instead of `SizeAsc`)
 - Cursor landed on the project header after reordering the tree (reset `list_index` should skip the header, matching `build_tree`)
+- In-process pure Rust SHA-256 calculation for self-update, eliminating external `sha256sum`/PowerShell dependencies and fixing macOS updates (`commands.rs`)
+- Enforced mandatory checksum verification and added CRLF/asterisk support in checksum parser (`commands.rs`)
 
 ### Changed
 - Tree list now shows a blank row between project groups for visual separation

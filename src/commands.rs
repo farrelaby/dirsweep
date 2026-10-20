@@ -1,30 +1,40 @@
+use sha2::Digest;
 use std::collections::HashMap;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::Path;
 use std::process::Command;
-
 const GITHUB_REPO: &str = "farrelaby/dirsweep";
 const MAX_RETRIES: u32 = 3;
 
-pub fn detect_target() -> &'static str {
+pub fn detect_target() -> Result<&'static str, &'static str> {
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     {
-        "x86_64-unknown-linux-gnu"
+        Ok("x86_64-unknown-linux-gnu")
     }
 
     #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
     {
-        "aarch64-unknown-linux-gnu"
+        Ok("aarch64-unknown-linux-gnu")
     }
 
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
-        "aarch64-apple-darwin"
+        Ok("aarch64-apple-darwin")
     }
 
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     {
-        "x86_64-pc-windows-msvc"
+        Ok("x86_64-pc-windows-msvc")
+    }
+
+    #[cfg(not(any(
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64"),
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "windows", target_arch = "x86_64")
+    )))]
+    {
+        Err("Unsupported operating system or architecture")
     }
 }
 
@@ -51,11 +61,19 @@ pub fn parse_checksums(content: &str) -> HashMap<String, String> {
     content
         .lines()
         .filter_map(|line| {
-            let parts: Vec<&str> = line.splitn(2, "  ").collect();
-            if parts.len() == 2 {
-                Some((parts[1].to_string(), parts[0].to_string()))
+            let line = line.trim();
+            let (hash, filename) = if let Some((h, f)) = line.split_once("  ") {
+                (h.trim(), f.trim())
+            } else if let Some((h, f)) = line.split_once(" *") {
+                (h.trim(), f.trim())
             } else {
+                return None;
+            };
+            let filename = filename.strip_prefix('*').unwrap_or(filename);
+            if hash.is_empty() || filename.is_empty() {
                 None
+            } else {
+                Some((filename.to_string(), hash.to_string()))
             }
         })
         .collect()
@@ -98,33 +116,23 @@ fn download_file(url: &str, dest: &Path) -> Result<(), Box<dyn std::error::Error
 }
 
 fn verify_checksum(file_path: &Path, expected_hash: &str) -> bool {
-    let output = if cfg!(target_os = "windows") {
-        Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-Command",
-                &format!(
-                    "(Get-FileHash -Path '{}' -Algorithm SHA256).Hash.ToLower()",
-                    file_path.display()
-                ),
-            ])
-            .output()
-    } else {
-        Command::new("sha256sum").arg(file_path).output()
+    let mut file = match std::fs::File::open(file_path) {
+        Ok(f) => f,
+        Err(_) => return false,
     };
 
-    match output {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            let actual_hash = if cfg!(target_os = "windows") {
-                stdout.trim().to_string()
-            } else {
-                stdout.split_whitespace().next().unwrap_or("").to_string()
-            };
-            actual_hash == expected_hash
+    let mut hasher = sha2::Sha256::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        match file.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(n) => hasher.update(&buffer[..n]),
+            Err(_) => return false,
         }
-        Err(_) => false,
     }
+
+    let actual_hash = format!("{:x}", hasher.finalize());
+    actual_hash.eq_ignore_ascii_case(expected_hash)
 }
 
 fn extract_archive(
@@ -184,7 +192,7 @@ fn prompt_confirm(message: &str, force: bool) -> bool {
 
 pub fn cmd_update() -> Result<(), Box<dyn std::error::Error>> {
     let current_version = env!("CARGO_PKG_VERSION");
-    let target = detect_target();
+    let target = detect_target()?;
 
     println!("Checking for updates...");
 
@@ -246,9 +254,15 @@ pub fn cmd_update() -> Result<(), Box<dyn std::error::Error>> {
         let checksums_content = std::fs::read_to_string(&checksums_path)?;
         let checksums = parse_checksums(&checksums_content);
 
-        if let Some(expected_hash) = checksums.get(archive_name)
-            && !verify_checksum(&archive_path, expected_hash)
-        {
+        let expected_hash = match checksums.get(archive_name) {
+            Some(hash) => hash,
+            None => {
+                println!("Update failed. Archive checksum missing.");
+                return Err("Archive checksum missing from checksums.txt".into());
+            }
+        };
+
+        if !verify_checksum(&archive_path, expected_hash) {
             if attempt == MAX_RETRIES {
                 println!("Update failed. Please try again later.");
                 return Err("Checksum mismatch".into());
@@ -366,10 +380,31 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_checksums_space_asterisk() {
+        let content = "abc123  *dirsweep-v0.1-linux.tar.gz\ndef456 *dirsweep-v0.1-macos.tar.gz\r\n";
+        let result = parse_checksums(content);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result.get("dirsweep-v0.1-linux.tar.gz").unwrap(), "abc123");
+        assert_eq!(result.get("dirsweep-v0.1-macos.tar.gz").unwrap(), "def456");
+    }
+
+    #[test]
     fn test_parse_checksums_empty() {
         let content = "";
         let result = parse_checksums(content);
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_verify_checksum() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        std::fs::write(&file_path, b"hello world\n").unwrap();
+        // sha256 of "hello world\n" is d9014c4624844aa5bac314773d6b689ad467fa4e1d1a50a1b8a99d5a95f72ff5
+        let expected_hash = "a948904f2f0f479b8f8197694b30184b0d2ed1c1cd2a1ec0fb85d299a192a447";
+        assert!(verify_checksum(&file_path, expected_hash));
+        assert!(verify_checksum(&file_path, &expected_hash.to_uppercase()));
+        assert!(!verify_checksum(&file_path, "invalidhash"));
     }
 
     #[test]
@@ -439,7 +474,7 @@ mod tests {
 
     #[test]
     fn test_detect_target_returns_non_empty() {
-        let target = detect_target();
+        let target = detect_target().unwrap();
         assert!(!target.is_empty());
     }
 
