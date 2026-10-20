@@ -1,10 +1,10 @@
 #!/usr/bin/env node
-const { existsSync, createWriteStream, mkdirSync, chmodSync, writeFileSync, readFileSync, unlinkSync } = require("fs");
+const { existsSync, createWriteStream, createReadStream, mkdirSync, chmodSync, writeFileSync, readFileSync, unlinkSync } = require("fs");
 const { join } = require("path");
 const { pipeline } = require("stream");
 const { promisify } = require("util");
 const https = require("https");
-const http = require("http");
+const crypto = require("crypto");
 const { spawnSync } = require("child_process");
 
 const pipe = promisify(pipeline);
@@ -47,16 +47,23 @@ function releaseUrl(target) {
 }
 
 function download(url, dest, redirects = 0) {
+  if (!url.startsWith("https://")) {
+    return Promise.reject(new Error("Insecure protocol: HTTPS required"));
+  }
   const MAX_REDIRECTS = 10;
-  const proto = url.startsWith("https") ? https : http;
   return new Promise((resolve, reject) => {
-    const req = proto.get(url, { timeout: TIMEOUT_MS }, (res) => {
+    const req = https.get(url, { timeout: TIMEOUT_MS }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         if (redirects >= MAX_REDIRECTS) {
           reject(new Error(`Too many redirects (${MAX_REDIRECTS}): ${url}`));
           return;
         }
-        download(res.headers.location, dest, redirects + 1).then(resolve).catch(reject);
+        const location = res.headers.location;
+        if (!location.startsWith("https://")) {
+          reject(new Error("Insecure protocol: HTTPS required"));
+          return;
+        }
+        download(location, dest, redirects + 1).then(resolve).catch(reject);
         return;
       }
       if (res.statusCode !== 200) {
@@ -72,6 +79,30 @@ function download(url, dest, redirects = 0) {
     });
     req.on("error", reject);
   });
+}
+
+function computeSha256(filePath) {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash("sha256");
+    const stream = createReadStream(filePath);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("end", () => resolve(hash.digest("hex").toLowerCase()));
+    stream.on("error", reject);
+  });
+}
+
+function parseChecksums(content) {
+  const map = {};
+  for (const line of content.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const match = trimmed.match(/^([a-fA-F0-9]{64})\s+\*?(.+)$/);
+    if (match) {
+      const filename = match[2].trim().replace(/^\.\//, "");
+      map[filename] = match[1].toLowerCase();
+    }
+  }
+  return map;
 }
 
 function isUpToDate() {
@@ -94,8 +125,29 @@ async function install() {
   try { unlinkSync(BIN_PATH); } catch {}
 
   const target = platform();
+  const ext = isWindows() ? "zip" : "tar.gz";
+  const archiveFilename = `dirsweep-v${VERSION}-${target}.${ext}`;
   const url = releaseUrl(target);
   const archivePath = join(BIN_DIR, isWindows() ? "dirsweep.zip" : "dirsweep.tar.gz");
+  const checksumsUrl = `https://github.com/farrelaby/dirsweep/releases/download/v${VERSION}/checksums.txt`;
+  const checksumsPath = join(BIN_DIR, "checksums.txt");
+
+  try {
+    await download(checksumsUrl, checksumsPath);
+  } catch (err) {
+    console.error(`Failed to download checksums from ${checksumsUrl}`);
+    console.error(err.message);
+    process.exit(1);
+  }
+
+  const checksumsContent = readFileSync(checksumsPath, "utf8");
+  const checksums = parseChecksums(checksumsContent);
+  const expectedHash = checksums[archiveFilename];
+  if (!expectedHash) {
+    console.error(`Checksum not found for ${archiveFilename} in checksums.txt`);
+    try { unlinkSync(checksumsPath); } catch {}
+    process.exit(1);
+  }
 
   console.log(`Downloading dirsweep v${VERSION} for ${target}...`);
 
@@ -104,13 +156,30 @@ async function install() {
   } catch (err) {
     console.error(`Failed to download from ${url}`);
     console.error(err.message);
+    try { unlinkSync(checksumsPath); } catch {}
     process.exit(1);
   }
 
+  const actualHash = await computeSha256(archivePath);
+  if (actualHash !== expectedHash.toLowerCase()) {
+    console.error(`Checksum mismatch for ${archiveFilename}: expected ${expectedHash}, got ${actualHash}`);
+    try { unlinkSync(archivePath); } catch {}
+    try { unlinkSync(checksumsPath); } catch {}
+    process.exit(1);
+  }
+
+  try { unlinkSync(checksumsPath); } catch {}
+
   if (isWindows()) {
+    const safeArchivePath = archivePath.replace(/'/g, "''");
+    const safeBinDir = BIN_DIR.replace(/'/g, "''");
     const ps = spawnSync(
       "powershell",
-      ["-NoProfile", "-Command", `Expand-Archive -Path '${archivePath}' -DestinationPath '${BIN_DIR}' -Force`],
+      [
+        "-NoProfile",
+        "-Command",
+        `Expand-Archive -LiteralPath '${safeArchivePath}' -DestinationPath '${safeBinDir}' -Force`,
+      ],
       { stdio: "inherit" }
     );
     if (ps.status !== 0) {
