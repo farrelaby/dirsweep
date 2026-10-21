@@ -50,7 +50,6 @@ pub enum AppPhase {
     Browsing,
     ConfirmDelete,
     Deleting,
-    ConfirmQuit,
     OrderDialog,
     Quit,
 }

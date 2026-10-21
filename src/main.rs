@@ -301,12 +301,6 @@ fn run_app(
                 match state.phase {
                     AppPhase::Browsing => handle_browsing_key(code, state)?,
                     AppPhase::ConfirmDelete => handle_confirm_key(code, state)?,
-                    AppPhase::ConfirmQuit => {
-                        handle_confirm_quit_key(code, state)?;
-                        if state.phase == AppPhase::Quit {
-                            break;
-                        }
-                    }
                     AppPhase::OrderDialog => handle_order_key(code, state)?,
                     _ => {}
                 }
@@ -424,8 +418,11 @@ fn handle_browsing_key(code: KeyCode, state: &mut AppState) -> io::Result<()> {
     // it and is moving on.
     state.clear_notification();
     match code {
+        // Exit is immediate: nothing destructive happens on close, selection
+        // is trivially re-made, and Trash is the default. A confirm step cost
+        // more than it protected.
         KeyCode::Char('q') | KeyCode::Esc => {
-            state.phase = AppPhase::ConfirmQuit;
+            state.phase = AppPhase::Quit;
         }
         KeyCode::Up | KeyCode::Char('k') => {
             state.move_up();
@@ -488,19 +485,6 @@ fn handle_confirm_key(code: KeyCode, state: &mut AppState) -> io::Result<()> {
             state.delete_preference = state.delete_preference.step_forward();
         }
         KeyCode::Enter => begin_delete(state),
-        _ => {}
-    }
-    Ok(())
-}
-
-fn handle_confirm_quit_key(code: KeyCode, state: &mut AppState) -> io::Result<()> {
-    match code {
-        KeyCode::Enter => {
-            state.phase = AppPhase::Quit;
-        }
-        KeyCode::Esc | KeyCode::Char('q') => {
-            state.phase = AppPhase::Browsing;
-        }
         _ => {}
     }
     Ok(())
@@ -637,6 +621,17 @@ mod tests {
         apply_mouse_action(MouseAction::SortBy(OrderBy::SizeDesc), &mut state);
         assert_eq!(state.phase, AppPhase::Browsing);
         assert_ne!(state.ordered_by, OrderBy::SizeDesc);
+    }
+
+    #[test]
+    fn quits_immediately_without_confirmation() {
+        let mut state = seeded_state();
+        handle_browsing_key(KeyCode::Char('q'), &mut state).unwrap();
+        assert_eq!(state.phase, AppPhase::Quit);
+
+        let mut state = seeded_state();
+        handle_browsing_key(KeyCode::Esc, &mut state).unwrap();
+        assert_eq!(state.phase, AppPhase::Quit);
     }
 
     #[test]

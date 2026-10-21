@@ -99,10 +99,6 @@ fn render_main(state: &AppState, frame: &mut Frame, area: Rect, zones: &mut Mous
             render_browsing(state, frame, area, zones);
             render_deleting(state, frame, area);
         }
-        AppPhase::ConfirmQuit => {
-            render_browsing(state, frame, area, zones);
-            render_confirm_quit_dialog(state, frame, area);
-        }
         AppPhase::OrderDialog => {
             render_browsing(state, frame, area, zones);
             render_order_dialog(state, frame, area, zones);
@@ -498,43 +494,6 @@ fn render_confirm_dialog(state: &AppState, frame: &mut Frame, area: Rect, zones:
                 .style(Style::default().fg(theme::STRUCTURE)),
         )
         .alignment(Alignment::Left);
-
-    frame.render_widget(dialog, dialog_area);
-}
-
-fn render_confirm_quit_dialog(_state: &AppState, frame: &mut Frame, area: Rect) {
-    let dialog_width = 40.min(area.width.saturating_sub(4));
-    let dialog_height = 7.min(area.height.saturating_sub(4));
-    let x = (area.width - dialog_width) / 2;
-    let y = (area.height - dialog_height) / 2;
-
-    let dialog_area = Rect {
-        x: area.x + x,
-        y: area.y + y,
-        width: dialog_width,
-        height: dialog_height,
-    };
-
-    frame.render_widget(Clear, dialog_area);
-
-    let lines = vec![
-        Line::from(""),
-        Line::from(Span::styled(" Quit?", theme::emphasis())),
-        Line::from(""),
-        Line::from(Span::styled(
-            " [Enter] confirm  [Esc] cancel",
-            Style::default().fg(theme::MUTED),
-        )),
-    ];
-
-    let dialog = Paragraph::new(Text::from(lines))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .style(Style::default().fg(theme::STRUCTURE)),
-        )
-        .alignment(Alignment::Center);
 
     frame.render_widget(dialog, dialog_area);
 }
