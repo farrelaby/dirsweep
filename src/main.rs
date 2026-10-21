@@ -26,6 +26,19 @@ enum SizeUpdate {
     Done,
 }
 
+struct TerminalGuard;
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        let backend = CrosstermBackend::new(io::stdout());
+        if let Ok(mut term) = Terminal::new(backend) {
+            let _ = term.show_cursor();
+        }
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "dirsweep",
@@ -77,20 +90,17 @@ fn main() -> io::Result<()> {
             } else {
                 std::env::current_dir()?.join(&args.dir)
             };
-
             enable_raw_mode()?;
             let mut stdout = io::stdout();
             execute!(stdout, EnterAlternateScreen)?;
             let backend = CrosstermBackend::new(stdout);
             let mut terminal = Terminal::new(backend)?;
 
+            let guard = TerminalGuard;
             let mut state = AppState::new(scan_path);
-            run_app(&mut terminal, &mut state)?;
-
-            disable_raw_mode()?;
-            execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-            terminal.show_cursor()?;
-
+            let run_result = run_app(&mut terminal, &mut state);
+            drop(guard);
+            run_result?;
             if state.total_deleted_count > 0 {
                 let noun = if state.total_deleted_count == 1 {
                     "directory"
@@ -173,6 +183,9 @@ fn run_app(
                         last_modified,
                         error,
                     } => {
+                        if !state.target_index.contains_key(&path) {
+                            continue;
+                        }
                         state.sizes_found += 1;
                         if let Some(msg) = error {
                             state.errors.push(msg);
@@ -192,6 +205,11 @@ fn run_app(
         }
 
         terminal.draw(|f| dirsweep::ui::render(state, f))?;
+
+        if state.phase == AppPhase::Deleting && state.deleting_paths.is_empty() {
+            state.phase = AppPhase::Browsing;
+            continue;
+        }
 
         if state.phase == AppPhase::Deleting && state.deleting_index < state.deleting_paths.len() {
             let path = state.deleting_paths[state.deleting_index].clone();
@@ -213,15 +231,28 @@ fn run_app(
 
             if state.deleting_index == state.deleting_paths.len() {
                 let count = state.deleting_paths.len() - state.deleting_failed.len();
-                let total_size = state.total_selected_size;
-                let size_str = humansize::format_size(total_size, humansize::BINARY);
+                let reclaimed_size: u64 = state
+                    .selected
+                    .iter()
+                    .filter(|p| !state.deleting_failed.contains(p))
+                    .filter_map(|p| {
+                        state
+                            .target_index
+                            .get(p)
+                            .and_then(|&idx| state.tree.get(idx))
+                            .and_then(|entry| match entry {
+                                TreeEntry::TargetDir { size, .. } => Some(*size),
+                                _ => None,
+                            })
+                    })
+                    .sum();
+                let size_str = humansize::format_size(reclaimed_size, humansize::BINARY);
 
                 for failed in &state.deleting_failed {
                     state.selected.remove(failed);
                 }
 
-                state.accumulate_deletion(count, total_size);
-
+                state.accumulate_deletion(count, reclaimed_size);
                 state.delete_result_summary = Some(if state.deleting_failed.is_empty() {
                     format!(
                         "Done! {} directory(ies) deleted, {} reclaimed",
@@ -306,7 +337,7 @@ fn handle_browsing_key(code: KeyCode, state: &mut AppState) -> io::Result<()> {
             state.clear_notification();
             state.deselect_all();
         }
-        KeyCode::Enter => {
+        KeyCode::Enter if state.selection_count() > 0 => {
             state.clear_notification();
             state.phase = AppPhase::ConfirmDelete;
         }
@@ -341,6 +372,11 @@ fn handle_order_key(code: KeyCode, state: &mut AppState) -> io::Result<()> {
 }
 
 fn handle_confirm_key(code: KeyCode, state: &mut AppState) -> io::Result<()> {
+    if state.selected.is_empty() {
+        state.phase = AppPhase::Browsing;
+        return Ok(());
+    }
+
     match code {
         KeyCode::Esc => {
             state.phase = AppPhase::Browsing;
