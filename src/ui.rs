@@ -7,10 +7,13 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
 
-use crate::app::{AppPhase, AppState, DeletePreference, OrderBy, TreeEntry};
+use crate::app::{
+    AppPhase, AppState, DeletePreference, MouseAction, MouseZones, OrderBy, TreeEntry,
+};
 use crate::theme;
 
-pub fn render(state: &AppState, frame: &mut Frame) {
+/// Renders one frame and returns its clickable regions for mouse hit-testing.
+pub fn render(state: &AppState, frame: &mut Frame) -> MouseZones {
     // No background paint: the terminal's own theme shows through.
     let areas = Layout::vertical([
         Constraint::Length(1),
@@ -19,9 +22,13 @@ pub fn render(state: &AppState, frame: &mut Frame) {
     ])
     .split(frame.area());
 
+    let mut zones = MouseZones::new();
+
     render_header(state, frame, areas[0]);
-    render_main(state, frame, areas[1]);
-    render_status_bar(state, frame, areas[2]);
+    render_main(state, frame, areas[1], &mut zones);
+    render_button_bar(state, frame, areas[2], &mut zones);
+
+    zones
 }
 
 fn render_header(state: &AppState, frame: &mut Frame, area: Rect) {
@@ -51,33 +58,33 @@ fn render_header(state: &AppState, frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(header), area);
 }
 
-fn render_main(state: &AppState, frame: &mut Frame, area: Rect) {
+fn render_main(state: &AppState, frame: &mut Frame, area: Rect, zones: &mut MouseZones) {
     match state.phase {
         AppPhase::Scanning => render_scanning(frame, area),
         AppPhase::Browsing => {
             if state.errors.is_empty() {
-                render_browsing(state, frame, area);
+                render_browsing(state, frame, area, zones);
             } else {
                 let [tree_area, error_area] =
                     Layout::vertical([Constraint::Min(0), Constraint::Length(3)]).areas(area);
-                render_browsing(state, frame, tree_area);
+                render_browsing(state, frame, tree_area, zones);
                 render_errors(state, frame, error_area);
             }
         }
         AppPhase::ConfirmDelete => {
-            render_browsing(state, frame, area);
+            render_browsing(state, frame, area, zones);
             render_confirm_dialog(state, frame, area);
         }
         AppPhase::Deleting => {
-            render_browsing(state, frame, area);
+            render_browsing(state, frame, area, zones);
             render_deleting(state, frame, area);
         }
         AppPhase::ConfirmQuit => {
-            render_browsing(state, frame, area);
+            render_browsing(state, frame, area, zones);
             render_confirm_quit_dialog(state, frame, area);
         }
         AppPhase::OrderDialog => {
-            render_browsing(state, frame, area);
+            render_browsing(state, frame, area, zones);
             render_order_dialog(state, frame, area);
         }
         AppPhase::Quit => {}
@@ -128,7 +135,7 @@ fn render_scanning(frame: &mut Frame, area: Rect) {
     frame.render_widget(text, area);
 }
 
-fn render_browsing(state: &AppState, frame: &mut Frame, area: Rect) {
+fn render_browsing(state: &AppState, frame: &mut Frame, area: Rect, zones: &mut MouseZones) {
     if state.tree.is_empty() {
         let text = Paragraph::new(" No sweepable directories found.")
             .style(Style::default().fg(theme::MUTED))
@@ -250,6 +257,15 @@ fn render_browsing(state: &AppState, frame: &mut Frame, area: Rect) {
         if scroll_offset + i == state.list_index {
             selected_row = items.len();
         }
+        // Every visible row is clickable: headers move the cursor, target rows
+        // toggle their checkbox.
+        zones.push((
+            Rect::new(area.x, area.y + items.len() as u16, area.width, 1),
+            match entry {
+                TreeEntry::TargetDir { .. } => MouseAction::ToggleAt(scroll_offset + i),
+                TreeEntry::ProjectHeader { .. } => MouseAction::MoveTo(scroll_offset + i),
+            },
+        ));
         items.push(item);
     }
 
@@ -468,55 +484,119 @@ fn render_deleting(state: &AppState, frame: &mut Frame, area: Rect) {
     frame.render_widget(dialog, dialog_area);
 }
 
-fn render_status_bar(state: &AppState, frame: &mut Frame, area: Rect) {
-    if state.phase == AppPhase::Browsing {
-        let (hints, extra) = if let Some(ref summary) = state.delete_result_summary {
-            let text = Line::from(vec![
-                Span::styled(
-                    format!(" {}", summary),
-                    Style::default()
-                        .fg(theme::SELECT)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(" "),
-                Span::styled(
-                    format!("  {}/{}", state.list_index + 1, state.tree.len()),
-                    Style::default().fg(theme::MUTED),
-                ),
-            ]);
-            let status = Paragraph::new(text);
-            frame.render_widget(status, area);
-            return;
+/// Persistent action bar: every action is a visible, clickable button that
+/// also names its keyboard shortcut, so the mouse and the keys teach each
+/// other. The cursor position indicator sits separately on the right.
+///
+/// The bar renders only in `Browsing` — dialogs and overlays cover it, and
+/// during `Deleting` no action is safe to offer.
+fn render_button_bar(state: &AppState, frame: &mut Frame, area: Rect, zones: &mut MouseZones) {
+    if state.phase != AppPhase::Browsing {
+        return;
+    }
+
+    // Position indicator on the right, with a two-column gap from the buttons.
+    let total = state.tree.len();
+    let pos = if total == 0 {
+        String::from("0/0")
+    } else {
+        format!("{}/{}", state.list_index + 1, total)
+    };
+
+    let selected = state.selection_count();
+    let delete_label = if selected > 0 {
+        format!(
+            "Delete ({} \u{b7} {})",
+            selected,
+            humansize::format_size(state.total_selected_size, humansize::BINARY)
+        )
+    } else {
+        String::from("Delete")
+    };
+
+    struct Button {
+        key: &'static str,
+        label: String,
+        action: MouseAction,
+        enabled: bool,
+    }
+
+    let buttons = [
+        Button {
+            key: "Space",
+            label: String::from("Toggle"),
+            action: MouseAction::Toggle,
+            enabled: true,
+        },
+        Button {
+            key: "a",
+            label: String::from("All"),
+            action: MouseAction::SelectAll,
+            enabled: true,
+        },
+        Button {
+            key: "d",
+            label: String::from("None"),
+            action: MouseAction::DeselectAll,
+            enabled: true,
+        },
+        Button {
+            key: "o",
+            label: String::from("Sort"),
+            action: MouseAction::OpenSort,
+            enabled: true,
+        },
+        Button {
+            key: "Enter",
+            label: delete_label,
+            action: MouseAction::Delete,
+            enabled: selected > 0,
+        },
+        Button {
+            key: "q",
+            label: String::from("Quit"),
+            action: MouseAction::Quit,
+            enabled: true,
+        },
+    ];
+
+    // Buttons must fit to the left of the position indicator.
+    let usable = area
+        .width
+        .saturating_sub(pos.len() as u16)
+        .saturating_sub(2);
+
+    let mut spans: Vec<Span> = Vec::new();
+    let mut x = area.x;
+    for b in &buttons {
+        // Each button renders as `[key] label` plus a two-column separator.
+        let key_text = format!("[{}]", b.key);
+        let width = (key_text.len() + 1 + b.label.len()) as u16;
+        if x + width + 2 > area.x + usable {
+            break;
+        }
+
+        let (key_style, label_style) = if b.enabled {
+            (theme::keycap(), Style::default())
         } else {
-            let hints =
-                " [Space] toggle  [a] all  [d] none  [Enter] delete  [o] order-by  [q] quit";
-
-            let mut extra_parts = Vec::new();
-            if let Some(ref size_status) = state.sizes_status() {
-                extra_parts.push(size_status.clone());
-            }
-            if state.selection_count() > 0 {
-                extra_parts.push(format!("{} selected", state.selection_count()));
-                extra_parts.push(humansize::format_size(
-                    state.total_selected_size,
-                    humansize::BINARY,
-                ));
-            }
-            extra_parts.push(format!("{}/{}", state.list_index + 1, state.tree.len()));
-            let extra = format!("  {}", extra_parts.join(" | "));
-
-            (hints, extra)
+            (theme::muted(), theme::muted())
         };
 
-        let text = Line::from(vec![
-            Span::styled(hints, Style::default().fg(theme::MUTED)),
-            Span::raw(" "),
-            Span::styled(extra, Style::default().fg(theme::MUTED)),
-        ]);
+        let rect = Rect::new(x, area.y, width, 1);
+        zones.push((rect, b.action));
 
-        let status = Paragraph::new(text);
-        frame.render_widget(status, area);
+        spans.push(Span::styled(key_text, key_style));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(b.label.clone(), label_style));
+        spans.push(Span::raw("  "));
+        x += width + 2;
     }
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    frame.render_widget(
+        Paragraph::new(Span::styled(pos, theme::muted())).alignment(Alignment::Right),
+        area,
+    );
 }
 
 fn render_order_dialog(state: &AppState, frame: &mut Frame, area: Rect) {
@@ -662,7 +742,12 @@ mod tests {
         state.phase = AppPhase::Browsing;
         state.list_index = 3;
         let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
-        terminal.draw(|f| render(&state, f)).unwrap();
+        let mut unused_zones = MouseZones::new();
+        terminal
+            .draw(|f| {
+                unused_zones = render(&state, f);
+            })
+            .unwrap();
 
         let header_b_row = (0..20u16)
             .find(|&r| row(&terminal, r).contains(" app-b (js) "))
@@ -687,5 +772,73 @@ mod tests {
             "expected exactly one reverse-video cursor row"
         );
         assert!(row(&terminal, cursor_rows[0]).contains("app-b/node_modules"));
+    }
+
+    #[test]
+    fn button_bar_registers_zone_per_button_and_row() {
+        let mut state = AppState::new(PathBuf::from("/test"));
+        state.build_tree(two_project_output());
+        state.phase = AppPhase::Browsing;
+        state.list_index = 3;
+        state.select_all();
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 20)).unwrap();
+        let mut zones = MouseZones::new();
+        terminal.draw(|f| zones = render(&state, f)).unwrap();
+
+        let actions: Vec<_> = zones.iter().map(|(_, a)| *a).collect();
+        // Bar buttons.
+        for expected in [
+            MouseAction::Toggle,
+            MouseAction::SelectAll,
+            MouseAction::DeselectAll,
+            MouseAction::OpenSort,
+            MouseAction::Delete,
+            MouseAction::Quit,
+        ] {
+            assert!(actions.contains(&expected), "missing zone for {expected:?}");
+        }
+        // Tree rows: headers move, targets toggle. Tree is
+        // [0] header, [1] target, [2] header, [3] target.
+        assert!(actions.contains(&MouseAction::ToggleAt(1)));
+        assert!(actions.contains(&MouseAction::ToggleAt(3)));
+        assert!(actions.contains(&MouseAction::MoveTo(0)));
+        assert!(actions.contains(&MouseAction::MoveTo(2)));
+
+        // Every zone stays inside the 120x20 frame.
+        for (rect, _) in &zones {
+            assert!(rect.y < 20 && rect.x + rect.width <= 120, "zone {rect:?}");
+        }
+
+        // The bar itself names keys, the selection totals, and the position.
+        let bar = row(&terminal, 19);
+        assert!(bar.contains("[Space] Toggle"), "{bar}");
+        assert!(bar.contains("[Enter] Delete (2"), "{bar}");
+        assert!(bar.contains("[q] Quit"), "{bar}");
+        assert!(bar.contains("4/4"), "{bar}");
+    }
+
+    #[test]
+    fn button_bar_truncates_on_narrow_terminal() {
+        let mut state = AppState::new(PathBuf::from("/test"));
+        state.build_tree(two_project_output());
+        state.phase = AppPhase::Browsing;
+
+        let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
+        let mut zones = MouseZones::new();
+        terminal.draw(|f| zones = render(&state, f)).unwrap();
+
+        // Buttons that don't fit are dropped from the right, never wrapped
+        // or clipped.
+        let bar = row(&terminal, 9);
+        assert!(bar.contains("[Space] Toggle"), "{bar}");
+        assert!(bar.contains("[d] None"), "{bar}");
+        assert!(!bar.contains("Delete"), "{bar}");
+        assert!(!bar.contains("Quit"), "{bar}");
+
+        // Every zone stays inside the 40-column frame.
+        for (rect, _) in &zones {
+            assert!(rect.y < 10 && rect.x + rect.width <= 40, "zone {rect:?}");
+        }
     }
 }

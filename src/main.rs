@@ -7,14 +7,17 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{Terminal, backend::CrosstermBackend};
+use ratatui::{Terminal, backend::CrosstermBackend, layout::Position};
 use rayon::prelude::*;
 
-use dirsweep::app::{AppPhase, AppState, DeletePreference, TreeEntry};
+use dirsweep::app::{AppPhase, AppState, DeletePreference, MouseAction, MouseZones, TreeEntry};
 
 enum SizeUpdate {
     Update {
@@ -31,7 +34,7 @@ struct TerminalGuard;
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
         let backend = CrosstermBackend::new(io::stdout());
         if let Ok(mut term) = Terminal::new(backend) {
             let _ = term.show_cursor();
@@ -92,7 +95,7 @@ fn main() -> io::Result<()> {
             };
             enable_raw_mode()?;
             let mut stdout = io::stdout();
-            execute!(stdout, EnterAlternateScreen)?;
+            execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
             let backend = CrosstermBackend::new(stdout);
             let mut terminal = Terminal::new(backend)?;
 
@@ -123,7 +126,8 @@ fn run_app(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     state: &mut AppState,
 ) -> io::Result<()> {
-    terminal.draw(|f| dirsweep::ui::render(state, f))?;
+    let mut mouse_zones = MouseZones::new();
+    terminal.draw(|f| mouse_zones = dirsweep::ui::render(state, f))?;
     let start = Instant::now();
     let output = dirsweep::scanner::scan(&state.scan_path);
     state.scan_duration_ms = start.elapsed().as_millis() as u64;
@@ -204,7 +208,7 @@ fn run_app(
             }
         }
 
-        terminal.draw(|f| dirsweep::ui::render(state, f))?;
+        terminal.draw(|f| mouse_zones = dirsweep::ui::render(state, f))?;
 
         if state.phase == AppPhase::Deleting && state.deleting_paths.is_empty() {
             state.phase = AppPhase::Browsing;
@@ -283,33 +287,90 @@ fn run_app(
         }
 
         let event = event::read()?;
-        if let Event::Key(KeyEvent {
-            code,
-            modifiers,
-            kind: KeyEventKind::Press,
-            ..
-        }) = event
-        {
-            if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
-                state.phase = AppPhase::Quit;
-                break;
-            }
-            match state.phase {
-                AppPhase::Browsing => handle_browsing_key(code, state)?,
-                AppPhase::ConfirmDelete => handle_confirm_key(code, state)?,
-                AppPhase::ConfirmQuit => {
-                    handle_confirm_quit_key(code, state)?;
-                    if state.phase == AppPhase::Quit {
-                        break;
-                    }
+        match event {
+            Event::Key(KeyEvent {
+                code,
+                modifiers,
+                kind: KeyEventKind::Press,
+                ..
+            }) => {
+                if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
+                    state.phase = AppPhase::Quit;
+                    break;
                 }
-                AppPhase::OrderDialog => handle_order_key(code, state)?,
-                _ => {}
+                match state.phase {
+                    AppPhase::Browsing => handle_browsing_key(code, state)?,
+                    AppPhase::ConfirmDelete => handle_confirm_key(code, state)?,
+                    AppPhase::ConfirmQuit => {
+                        handle_confirm_quit_key(code, state)?;
+                        if state.phase == AppPhase::Quit {
+                            break;
+                        }
+                    }
+                    AppPhase::OrderDialog => handle_order_key(code, state)?,
+                    _ => {}
+                }
             }
+            Event::Mouse(mouse) => handle_mouse(mouse, state, &mouse_zones),
+            _ => {}
+        }
+
+        if state.phase == AppPhase::Quit {
+            break;
         }
     }
 
     Ok(())
+}
+
+/// Hit-test a mouse event against the newest frame's clickable regions.
+///
+/// Regions are checked in reverse render order so widgets drawn last
+/// (dialogs over the list) win. A left click that hits nothing dismisses a
+/// result notice; clicks on empty space are otherwise ignored.
+fn handle_mouse(mouse: MouseEvent, state: &mut AppState, zones: &MouseZones) {
+    match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            let pos = Position::new(mouse.column, mouse.row);
+            for (rect, action) in zones.iter().rev() {
+                if rect.contains(pos) {
+                    state.clear_notification();
+                    apply_mouse_action(*action, state);
+                    break;
+                }
+            }
+        }
+        MouseEventKind::ScrollUp => state.move_up(),
+        MouseEventKind::ScrollDown => state.move_down(),
+        _ => {}
+    }
+}
+
+/// Mouse actions mirror the keyboard paths exactly — every branch here has a
+/// key that does the same thing, so mouse and keyboard can never disagree
+/// about state (e.g. `Delete` is as inert as `Enter` when nothing is
+/// selected).
+fn apply_mouse_action(action: MouseAction, state: &mut AppState) {
+    match action {
+        MouseAction::Toggle => state.toggle_selection(),
+        MouseAction::MoveTo(i) => state.jump_to(i),
+        MouseAction::ToggleAt(i) => {
+            state.jump_to(i);
+            state.toggle_selection();
+        }
+        MouseAction::SelectAll => state.select_all(),
+        MouseAction::DeselectAll => state.deselect_all(),
+        MouseAction::OpenSort => {
+            state.order_cursor = state.ordered_by;
+            state.phase = AppPhase::OrderDialog;
+        }
+        MouseAction::Delete => {
+            if state.selection_count() > 0 {
+                state.phase = AppPhase::ConfirmDelete;
+            }
+        }
+        MouseAction::Quit => state.phase = AppPhase::Quit,
+    }
 }
 
 fn handle_browsing_key(code: KeyCode, state: &mut AppState) -> io::Result<()> {
@@ -417,4 +478,73 @@ fn handle_confirm_quit_key(code: KeyCode, state: &mut AppState) -> io::Result<()
         _ => {}
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dirsweep::scanner::{ProjectInfo, ScanOutput, ScannedDir};
+
+    fn scan_output() -> ScanOutput {
+        let project = ProjectInfo {
+            path: PathBuf::from("/test/app"),
+            name: "app".to_string(),
+            languages: vec!["js".to_string()],
+            children: vec![PathBuf::from("/test/app/node_modules")],
+        };
+        ScanOutput {
+            target_dirs: vec![ScannedDir {
+                path: PathBuf::from("/test/app/node_modules"),
+                size: 1_000,
+                last_modified: Utc::now(),
+                error: None,
+            }],
+            projects: vec![project],
+            ..Default::default()
+        }
+    }
+
+    fn seeded_state() -> AppState {
+        let mut state = AppState::new(PathBuf::from("/test"));
+        state.build_tree(scan_output());
+        state.phase = AppPhase::Browsing;
+        state
+    }
+
+    #[test]
+    fn mouse_row_click_moves_cursor_and_toggles() {
+        // Tree: [0] header, [1] node_modules.
+        let mut state = seeded_state();
+        assert_eq!(state.list_index, 1);
+
+        apply_mouse_action(MouseAction::ToggleAt(1), &mut state);
+        assert_eq!(state.selection_count(), 1);
+        assert_eq!(state.list_index, 1);
+
+        apply_mouse_action(MouseAction::ToggleAt(1), &mut state);
+        assert_eq!(state.selection_count(), 0);
+    }
+
+    #[test]
+    fn mouse_delete_is_inert_without_selection() {
+        let mut state = seeded_state();
+        apply_mouse_action(MouseAction::Delete, &mut state);
+        assert_eq!(state.phase, AppPhase::Browsing);
+
+        state.select_all();
+        apply_mouse_action(MouseAction::Delete, &mut state);
+        assert_eq!(state.phase, AppPhase::ConfirmDelete);
+    }
+
+    #[test]
+    fn mouse_select_all_deselect_all_and_quit() {
+        let mut state = seeded_state();
+        apply_mouse_action(MouseAction::SelectAll, &mut state);
+        assert_eq!(state.selection_count(), 1);
+        apply_mouse_action(MouseAction::DeselectAll, &mut state);
+        assert_eq!(state.selection_count(), 0);
+
+        apply_mouse_action(MouseAction::Quit, &mut state);
+        assert_eq!(state.phase, AppPhase::Quit);
+    }
 }

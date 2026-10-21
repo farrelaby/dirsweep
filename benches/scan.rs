@@ -70,7 +70,10 @@ fn bench_pipeline(c: &mut Criterion, fixtures: &[Fixture]) {
                 state.build_tree(scanner::scan(black_box(&f.dir)));
                 state.phase = AppPhase::Browsing;
                 terminal
-                    .draw(|frame| dirsweep::ui::render(&state, frame))
+                    .draw(|frame| {
+                        let zones = dirsweep::ui::render(&state, frame);
+                        black_box(zones);
+                    })
                     .expect("draw");
                 black_box(state);
             });
@@ -225,7 +228,10 @@ fn bench_render(c: &mut Criterion, fixtures: &[Fixture]) {
 
             b.iter(|| {
                 terminal
-                    .draw(|frame| dirsweep::ui::render(&state, frame))
+                    .draw(|frame| {
+                        let zones = dirsweep::ui::render(&state, frame);
+                        black_box(zones);
+                    })
                     .expect("draw");
             });
         });

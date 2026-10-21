@@ -2,8 +2,35 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
+use ratatui::layout::Rect;
 
 use crate::scanner::{ScanOutput, ScannedDir};
+
+/// What a click at a screen position does.
+///
+/// The renderer registers clickable regions as `(Rect, MouseAction)` each
+/// frame; the event loop hit-tests clicks against the newest frame's regions
+/// in reverse render order, so widgets drawn last (dialogs) win. Actions are
+/// phase-scoped by construction: a region only exists in the frames of the
+/// phase that registered it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MouseAction {
+    /// Toggle the selection of the row under the cursor.
+    Toggle,
+    /// Move the cursor onto this tree entry (project headers).
+    MoveTo(usize),
+    /// Move the cursor onto this tree entry and toggle its selection.
+    ToggleAt(usize),
+    SelectAll,
+    DeselectAll,
+    OpenSort,
+    /// Open the delete confirmation (no-op with an empty selection).
+    Delete,
+    Quit,
+}
+
+/// Clickable regions of the most recently rendered frame.
+pub type MouseZones = Vec<(Rect, MouseAction)>;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AppPhase {
@@ -272,6 +299,13 @@ impl AppState {
 
     pub fn selection_count(&self) -> usize {
         self.selected.len()
+    }
+
+    /// Move the cursor onto a specific tree entry (mouse row click).
+    pub fn jump_to(&mut self, index: usize) {
+        if index < self.tree.len() {
+            self.list_index = index;
+        }
     }
 
     pub fn remove_deleted_from_tree(&mut self) {
@@ -899,6 +933,19 @@ mod tests {
             state.move_up();
         }
         assert_eq!(state.list_index, 1);
+    }
+
+    #[test]
+    fn test_jump_to_moves_cursor_only_within_tree() {
+        let mut state = AppState::new(PathBuf::from("/test"));
+        state.build_tree(make_scan_output());
+        assert_eq!(state.tree.len(), 3);
+
+        state.jump_to(2);
+        assert_eq!(state.list_index, 2);
+
+        state.jump_to(99);
+        assert_eq!(state.list_index, 2, "out-of-range jumps are ignored");
     }
 
     #[test]
