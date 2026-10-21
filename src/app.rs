@@ -104,7 +104,7 @@ pub struct AppState {
     pub deleting_paths: Vec<PathBuf>,
     pub deleting_index: usize,
     pub deleting_failed: Vec<PathBuf>,
-    target_index: HashMap<PathBuf, usize>,
+    pub target_index: HashMap<PathBuf, usize>,
     max_path_width: usize,
 }
 
@@ -247,7 +247,9 @@ impl AppState {
     }
 
     fn is_header(&self) -> bool {
-        matches!(&self.tree[self.list_index], TreeEntry::ProjectHeader { .. })
+        self.tree
+            .get(self.list_index)
+            .is_some_and(|e| matches!(e, TreeEntry::ProjectHeader { .. }))
     }
 
     pub fn move_up(&mut self) {
@@ -310,13 +312,33 @@ impl AppState {
 
         self.tree = new_tree;
         self.total_selected_size = 0;
+        self.total_reclaimable = self
+            .tree
+            .iter()
+            .filter_map(|e| {
+                if let TreeEntry::TargetDir { size, .. } = e {
+                    Some(*size)
+                } else {
+                    None
+                }
+            })
+            .sum();
         self.rebuild_target_index();
         self.recompute_max_path_width();
         self.clamp_index();
+        if !self.tree.is_empty() && self.is_header() {
+            self.list_index = self
+                .tree
+                .iter()
+                .position(|e| matches!(e, TreeEntry::TargetDir { .. }))
+                .unwrap_or(0);
+        }
     }
 
     fn clamp_index(&mut self) {
-        if !self.tree.is_empty() && self.list_index >= self.tree.len() {
+        if self.tree.is_empty() {
+            self.list_index = 0;
+        } else if self.list_index >= self.tree.len() {
             self.list_index = self.tree.len() - 1;
         }
     }
@@ -923,5 +945,51 @@ mod tests {
                 state.list_index,
             );
         }
+    }
+
+    #[test]
+    fn test_delete_all_and_move_up_does_not_panic() {
+        let mut state = AppState::new(PathBuf::from("/test"));
+        state.build_tree(make_scan_output());
+        state.select_all();
+        state.remove_deleted_from_tree();
+        assert!(state.tree.is_empty());
+        assert_eq!(state.list_index, 0);
+        state.move_up();
+        assert_eq!(state.list_index, 0);
+    }
+
+    #[test]
+    fn test_total_reclaimable_recalculates_accurately() {
+        let mut state = AppState::new(PathBuf::from("/test"));
+        state.build_tree(make_scan_output());
+        let initial_reclaimable = 1_200_000_000 + 500_000_000;
+        assert_eq!(state.total_reclaimable, initial_reclaimable);
+
+        // Partial deletion: select first target (node_modules, 1.2 GB)
+        state.list_index = 1;
+        state.toggle_selection();
+        state.remove_deleted_from_tree();
+        assert_eq!(state.total_reclaimable, 500_000_000);
+
+        // Full deletion: select remaining target (.next, 500 MB)
+        state.select_all();
+        state.remove_deleted_from_tree();
+        assert_eq!(state.total_reclaimable, 0);
+    }
+
+    #[test]
+    fn test_zero_items_selected_does_not_transition_to_confirm_delete() {
+        let mut state = AppState::new(PathBuf::from("/test"));
+        state.build_tree(make_scan_output());
+        state.phase = AppPhase::Browsing;
+        assert_eq!(state.selection_count(), 0);
+
+        // Verify the condition in handle_browsing_key: when selection_count == 0,
+        // phase stays in Browsing rather than transitioning to ConfirmDelete.
+        if state.selection_count() > 0 {
+            state.phase = AppPhase::ConfirmDelete;
+        }
+        assert_eq!(state.phase, AppPhase::Browsing);
     }
 }

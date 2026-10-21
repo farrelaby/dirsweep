@@ -38,6 +38,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 ### Fixed
 - Order-by dialog: pressing Up on the last menu item wrapped two rows instead of one (`SizeDesc` mapped to `DateAsc` instead of `SizeAsc`)
 - Cursor landed on the project header after reordering the tree (reset `list_index` should skip the header, matching `build_tree`)
+- Event loop deadlock when confirming deletion with 0 items selected (`main.rs`)
+- Out-of-bounds index panic when navigating an empty tree after deleting all targets (`app.rs`)
+- Cursor reset to valid target dir when remaining items shift after deletion (`app.rs`)
+- Terminal state (raw mode, alternate screen, cursor) guaranteed restored on exit or panic via RAII guard (`main.rs`)
+- Reclaimed size calculation now strictly counts successful deletions, excluding failed targets (`main.rs`)
+- Recomputed `total_reclaimable` header metric after target dirs are removed from tree (`app.rs`)
+- Prevented spurious `ENOENT` read errors when background size walk races with active deletion (`main.rs`)
 - In-process pure Rust SHA-256 calculation for self-update, eliminating external `sha256sum`/PowerShell dependencies and fixing macOS updates (`commands.rs`)
 - Enforced mandatory checksum verification and added CRLF/asterisk support in checksum parser (`commands.rs`)
 
