@@ -24,6 +24,8 @@ pub enum MouseAction {
     SelectAll,
     DeselectAll,
     OpenSort,
+    /// Open the help overlay.
+    OpenHelp,
     /// Open the delete confirmation (no-op with an empty selection).
     Delete,
     Quit,
@@ -50,6 +52,7 @@ pub enum AppPhase {
     Browsing,
     ConfirmDelete,
     Deleting,
+    Help,
     OrderDialog,
     Quit,
 }

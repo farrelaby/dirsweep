@@ -103,8 +103,78 @@ fn render_main(state: &AppState, frame: &mut Frame, area: Rect, zones: &mut Mous
             render_browsing(state, frame, area, zones);
             render_order_dialog(state, frame, area, zones);
         }
+        AppPhase::Help => {
+            render_browsing(state, frame, area, zones);
+            render_help_dialog(frame, area, zones);
+        }
         AppPhase::Quit => {}
     }
+}
+
+/// The `?` help overlay: every key and button on one screen, grouped by
+/// purpose, in plain language. Rendered over the browsing view. Any key or a
+/// click on the overlay returns to browsing.
+fn render_help_dialog(frame: &mut Frame, area: Rect, zones: &mut MouseZones) {
+    fn row(key: &str, desc: &str) -> Line<'static> {
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(format!("{:<10}", key), theme::keycap()),
+            Span::styled(desc.to_string(), Style::default()),
+        ])
+    }
+
+    fn group(title: &str) -> Line<'static> {
+        Line::from(Span::styled(
+            format!(" {}", title),
+            Style::default()
+                .fg(theme::STRUCTURE)
+                .add_modifier(Modifier::BOLD),
+        ))
+    }
+
+    let lines = vec![
+        Line::from(Span::styled(" Help", theme::emphasis())),
+        Line::from(""),
+        group("Navigate"),
+        row("[\u{2191}/\u{2193}]", "Move the cursor"),
+        row("[Space]", "Toggle the selected row"),
+        group("Select"),
+        row("[a]", "Select everything"),
+        row("[d]", "Select nothing"),
+        group("Actions"),
+        row("[Enter]", "Delete what you selected"),
+        row("[o]", "Sort the list"),
+        group("Other"),
+        row("[?]", "Show or close this help"),
+        row("[q]", "Quit"),
+    ];
+
+    let content_height = lines.len();
+    let dialog_width = 50.min(area.width.saturating_sub(4));
+    let dialog_height = ((content_height + 2) as u16).min(area.height.saturating_sub(4).max(3));
+    let x = (area.width - dialog_width) / 2;
+    let y = (area.height - dialog_height) / 2;
+
+    let dialog_area = Rect {
+        x: area.x + x,
+        y: area.y + y,
+        width: dialog_width,
+        height: dialog_height,
+    };
+
+    frame.render_widget(Clear, dialog_area);
+    zones.push((dialog_area, MouseAction::Dismiss));
+
+    let dialog = Paragraph::new(Text::from(lines))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .style(Style::default().fg(theme::STRUCTURE)),
+        )
+        .alignment(Alignment::Left);
+
+    frame.render_widget(dialog, dialog_area);
 }
 
 fn render_errors(state: &AppState, frame: &mut Frame, area: Rect) {
@@ -674,6 +744,12 @@ fn render_button_bar(state: &AppState, frame: &mut Frame, area: Rect, zones: &mu
             enabled: true,
         },
         Button {
+            key: "?",
+            label: String::from("Help"),
+            action: MouseAction::OpenHelp,
+            enabled: true,
+        },
+        Button {
             key: "Enter",
             label: delete_label,
             action: MouseAction::Delete,
@@ -951,6 +1027,7 @@ mod tests {
             MouseAction::SelectAll,
             MouseAction::DeselectAll,
             MouseAction::OpenSort,
+            MouseAction::OpenHelp,
             MouseAction::Delete,
             MouseAction::Quit,
         ] {
@@ -1137,6 +1214,32 @@ mod tests {
         }
         assert!(zones.iter().any(|(_, a)| *a == MouseAction::Confirm));
         assert!(zones.iter().any(|(_, a)| *a == MouseAction::Cancel));
+    }
+
+    #[test]
+    fn help_overlay_lists_keys_and_closes_on_click() {
+        let mut state = AppState::new(PathBuf::from("/test"));
+        state.build_tree(two_project_output());
+        state.phase = AppPhase::Help;
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+        let mut zones = MouseZones::new();
+        terminal
+            .draw(|f| {
+                zones = render(&state, f);
+            })
+            .unwrap();
+
+        let text: String = (0..20u16).map(|r| row(&terminal, r)).collect();
+        assert!(text.contains("Help"), "{text}");
+        assert!(text.contains("Navigate"), "{text}");
+        assert!(text.contains("Move the cursor"), "{text}");
+        assert!(text.contains("Toggle the selected row"), "{text}");
+        assert!(text.contains("Delete what you selected"), "{text}");
+        assert!(text.contains("Sort the list"), "{text}");
+
+        // Any click on the overlay closes it.
+        assert!(zones.iter().any(|(_, a)| *a == MouseAction::Dismiss));
     }
 
     #[test]

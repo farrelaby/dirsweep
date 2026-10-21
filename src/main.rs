@@ -298,12 +298,7 @@ fn run_app(
                     state.phase = AppPhase::Quit;
                     break;
                 }
-                match state.phase {
-                    AppPhase::Browsing => handle_browsing_key(code, state)?,
-                    AppPhase::ConfirmDelete => handle_confirm_key(code, state)?,
-                    AppPhase::OrderDialog => handle_order_key(code, state)?,
-                    _ => {}
-                }
+                handle_key(code, state)?;
             }
             Event::Mouse(mouse) => handle_mouse(mouse, state, &mouse_zones),
             _ => {}
@@ -314,6 +309,21 @@ fn run_app(
         }
     }
 
+    Ok(())
+}
+
+/// Route a key press to the handler of the active phase. Shared by
+/// `run_app`'s event loop so the dispatch is testable in isolation.
+fn handle_key(code: KeyCode, state: &mut AppState) -> io::Result<()> {
+    match state.phase {
+        AppPhase::Browsing => handle_browsing_key(code, state)?,
+        AppPhase::ConfirmDelete => handle_confirm_key(code, state)?,
+        AppPhase::OrderDialog => handle_order_key(code, state)?,
+        // Help is read-only: any key returns to browsing. `q` closes the
+        // help first; quitting needs a second press.
+        AppPhase::Help => state.phase = AppPhase::Browsing,
+        _ => {}
+    }
     Ok(())
 }
 
@@ -358,6 +368,11 @@ fn apply_mouse_action(action: MouseAction, state: &mut AppState) {
             state.order_cursor = state.ordered_by;
             state.phase = AppPhase::OrderDialog;
         }
+        MouseAction::OpenHelp => {
+            if state.phase == AppPhase::Browsing {
+                state.phase = AppPhase::Help;
+            }
+        }
         MouseAction::Delete => {
             if state.selection_count() > 0 {
                 state.phase = AppPhase::ConfirmDelete;
@@ -389,8 +404,11 @@ fn apply_mouse_action(action: MouseAction, state: &mut AppState) {
             }
         }
         MouseAction::Dismiss => {
-            if state.phase == AppPhase::Browsing {
-                state.clear_notification();
+            match state.phase {
+                AppPhase::Browsing => state.clear_notification(),
+                // Any click on the help overlay closes it.
+                AppPhase::Help => state.phase = AppPhase::Browsing,
+                _ => {}
             }
         }
     }
@@ -421,6 +439,9 @@ fn handle_browsing_key(code: KeyCode, state: &mut AppState) -> io::Result<()> {
         // Exit is immediate: nothing destructive happens on close, selection
         // is trivially re-made, and Trash is the default. A confirm step cost
         // more than it protected.
+        KeyCode::Char('?') => {
+            state.phase = AppPhase::Help;
+        }
         KeyCode::Char('q') | KeyCode::Esc => {
             state.phase = AppPhase::Quit;
         }
@@ -632,6 +653,23 @@ mod tests {
         let mut state = seeded_state();
         handle_browsing_key(KeyCode::Esc, &mut state).unwrap();
         assert_eq!(state.phase, AppPhase::Quit);
+    }
+
+    #[test]
+    fn help_opens_with_question_mark_and_closes_on_any_key() {
+        let mut state = seeded_state();
+        handle_key(KeyCode::Char('?'), &mut state).unwrap();
+        assert_eq!(state.phase, AppPhase::Help);
+
+        // `q` inside the help closes it; quitting takes a second press.
+        handle_key(KeyCode::Char('q'), &mut state).unwrap();
+        assert_eq!(state.phase, AppPhase::Browsing);
+
+        // Mouse can open it too, and clicking the overlay closes it.
+        apply_mouse_action(MouseAction::OpenHelp, &mut state);
+        assert_eq!(state.phase, AppPhase::Help);
+        apply_mouse_action(MouseAction::Dismiss, &mut state);
+        assert_eq!(state.phase, AppPhase::Browsing);
     }
 
     #[test]
