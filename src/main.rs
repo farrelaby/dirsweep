@@ -370,36 +370,79 @@ fn apply_mouse_action(action: MouseAction, state: &mut AppState) {
             }
         }
         MouseAction::Quit => state.phase = AppPhase::Quit,
+        MouseAction::Confirm => match state.phase {
+            AppPhase::ConfirmDelete if !state.selected.is_empty() => begin_delete(state),
+            AppPhase::OrderDialog => apply_sort(state),
+            _ => {}
+        },
+        MouseAction::Cancel => match state.phase {
+            AppPhase::ConfirmDelete | AppPhase::OrderDialog => state.phase = AppPhase::Browsing,
+            _ => {}
+        },
+        MouseAction::SetDeleteMode(preference) => {
+            if state.phase == AppPhase::ConfirmDelete {
+                state.delete_preference = preference;
+            }
+        }
+        MouseAction::SortBy(order) => {
+            if state.phase == AppPhase::OrderDialog {
+                state.order_cursor = order;
+            }
+        }
+        MouseAction::ApplySort => {
+            if state.phase == AppPhase::OrderDialog {
+                apply_sort(state);
+            }
+        }
+        MouseAction::Dismiss => {
+            if state.phase == AppPhase::Browsing {
+                state.clear_notification();
+            }
+        }
     }
 }
 
+/// Arm the deletion pipeline. Shared by the Enter key and the dialog's
+/// confirm button so the two entry points can never drift.
+fn begin_delete(state: &mut AppState) {
+    state.deleting_paths = state.selected.iter().cloned().collect();
+    state.deleting_index = 0;
+    state.deleting_failed = Vec::new();
+    state.phase = AppPhase::Deleting;
+}
+
+/// Commit the sort picked in the sort dialog. Shared by Enter and the
+/// dialog's apply button.
+fn apply_sort(state: &mut AppState) {
+    state.ordered_by = state.order_cursor;
+    state.order_tree(state.order_cursor);
+    state.phase = AppPhase::Browsing;
+}
+
 fn handle_browsing_key(code: KeyCode, state: &mut AppState) -> io::Result<()> {
+    // Any action dismisses the last sweep's result notice: the user has seen
+    // it and is moving on.
+    state.clear_notification();
     match code {
         KeyCode::Char('q') | KeyCode::Esc => {
             state.phase = AppPhase::ConfirmQuit;
         }
         KeyCode::Up | KeyCode::Char('k') => {
-            state.clear_notification();
             state.move_up();
         }
         KeyCode::Down | KeyCode::Char('j') => {
-            state.clear_notification();
             state.move_down();
         }
         KeyCode::Char(' ') => {
-            state.clear_notification();
             state.toggle_selection();
         }
         KeyCode::Char('a') => {
-            state.clear_notification();
             state.select_all();
         }
         KeyCode::Char('d') => {
-            state.clear_notification();
             state.deselect_all();
         }
         KeyCode::Enter if state.selection_count() > 0 => {
-            state.clear_notification();
             state.phase = AppPhase::ConfirmDelete;
         }
         KeyCode::Char('o') => {
@@ -414,16 +457,12 @@ fn handle_browsing_key(code: KeyCode, state: &mut AppState) -> io::Result<()> {
 fn handle_order_key(code: KeyCode, state: &mut AppState) -> io::Result<()> {
     match code {
         KeyCode::Up | KeyCode::Char('k') => {
-            state.order_cursor = state.order_cursor.prev();
+            state.order_cursor = state.order_cursor.step(-1);
         }
         KeyCode::Down | KeyCode::Char('j') => {
-            state.order_cursor = state.order_cursor.next();
+            state.order_cursor = state.order_cursor.step(1);
         }
-        KeyCode::Enter => {
-            state.ordered_by = state.order_cursor;
-            state.order_tree(state.order_cursor);
-            state.phase = AppPhase::Browsing;
-        }
+        KeyCode::Enter => apply_sort(state),
         KeyCode::Esc => {
             state.phase = AppPhase::Browsing;
         }
@@ -443,25 +482,12 @@ fn handle_confirm_key(code: KeyCode, state: &mut AppState) -> io::Result<()> {
             state.phase = AppPhase::Browsing;
         }
         KeyCode::Up | KeyCode::Char('k') => {
-            state.delete_preference = match state.delete_preference {
-                DeletePreference::DryRun => DeletePreference::Permanent,
-                DeletePreference::Trash => DeletePreference::DryRun,
-                DeletePreference::Permanent => DeletePreference::Trash,
-            };
+            state.delete_preference = state.delete_preference.step_back();
         }
         KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
-            state.delete_preference = match state.delete_preference {
-                DeletePreference::DryRun => DeletePreference::Trash,
-                DeletePreference::Trash => DeletePreference::Permanent,
-                DeletePreference::Permanent => DeletePreference::DryRun,
-            };
+            state.delete_preference = state.delete_preference.step_forward();
         }
-        KeyCode::Enter => {
-            state.deleting_paths = state.selected.iter().cloned().collect();
-            state.deleting_index = 0;
-            state.deleting_failed = Vec::new();
-            state.phase = AppPhase::Deleting;
-        }
+        KeyCode::Enter => begin_delete(state),
         _ => {}
     }
     Ok(())
@@ -483,6 +509,7 @@ fn handle_confirm_quit_key(code: KeyCode, state: &mut AppState) -> io::Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dirsweep::app::OrderBy;
     use dirsweep::scanner::{ProjectInfo, ScanOutput, ScannedDir};
 
     fn scan_output() -> ScanOutput {
@@ -546,5 +573,78 @@ mod tests {
 
         apply_mouse_action(MouseAction::Quit, &mut state);
         assert_eq!(state.phase, AppPhase::Quit);
+    }
+
+    #[test]
+    fn confirm_dialog_nav_stays_in_mode_order() {
+        let mut state = seeded_state();
+        state.select_all();
+        state.phase = AppPhase::ConfirmDelete;
+        state.delete_preference = DeletePreference::DryRun;
+
+        // Up at the top must not wrap onto the destructive option.
+        handle_confirm_key(KeyCode::Up, &mut state).unwrap();
+        assert_eq!(state.delete_preference, DeletePreference::DryRun);
+
+        handle_confirm_key(KeyCode::Down, &mut state).unwrap();
+        assert_eq!(state.delete_preference, DeletePreference::Trash);
+        handle_confirm_key(KeyCode::Down, &mut state).unwrap();
+        assert_eq!(state.delete_preference, DeletePreference::Permanent);
+        handle_confirm_key(KeyCode::Down, &mut state).unwrap();
+        assert_eq!(
+            state.delete_preference,
+            DeletePreference::Permanent,
+            "Down at the bottom must stay put"
+        );
+
+        // Enter arms the deletion pipeline.
+        handle_confirm_key(KeyCode::Enter, &mut state).unwrap();
+        assert_eq!(state.phase, AppPhase::Deleting);
+        assert_eq!(state.deleting_paths.len(), 1);
+    }
+
+    #[test]
+    fn mouse_dialog_actions_work_only_in_their_phase() {
+        let mut state = seeded_state();
+        state.select_all();
+        state.phase = AppPhase::ConfirmDelete;
+
+        apply_mouse_action(
+            MouseAction::SetDeleteMode(DeletePreference::Permanent),
+            &mut state,
+        );
+        assert_eq!(state.delete_preference, DeletePreference::Permanent);
+
+        apply_mouse_action(MouseAction::Cancel, &mut state);
+        assert_eq!(state.phase, AppPhase::Browsing);
+
+        // Selection survives a cancel; the chooser re-opens by mouse or Enter.
+        apply_mouse_action(MouseAction::Delete, &mut state);
+        assert_eq!(state.phase, AppPhase::ConfirmDelete);
+        apply_mouse_action(MouseAction::Confirm, &mut state);
+        assert_eq!(state.phase, AppPhase::Deleting);
+
+        let mut state = seeded_state();
+        state.phase = AppPhase::OrderDialog;
+        apply_mouse_action(MouseAction::SortBy(OrderBy::SizeDesc), &mut state);
+        assert_eq!(state.order_cursor, OrderBy::SizeDesc);
+        apply_mouse_action(MouseAction::ApplySort, &mut state);
+        assert_eq!(state.phase, AppPhase::Browsing);
+        assert_eq!(state.ordered_by, OrderBy::SizeDesc);
+
+        // Sort actions are inert outside the sort dialog.
+        let mut state = seeded_state();
+        apply_mouse_action(MouseAction::SortBy(OrderBy::SizeDesc), &mut state);
+        assert_eq!(state.phase, AppPhase::Browsing);
+        assert_ne!(state.ordered_by, OrderBy::SizeDesc);
+    }
+
+    #[test]
+    fn any_browsing_action_dismisses_the_result_notice() {
+        let mut state = seeded_state();
+        state.delete_result_summary = Some("Done! 1 deleted".to_string());
+
+        handle_browsing_key(KeyCode::Up, &mut state).unwrap();
+        assert_eq!(state.delete_result_summary, None);
     }
 }

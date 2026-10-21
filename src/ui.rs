@@ -33,26 +33,40 @@ pub fn render(state: &AppState, frame: &mut Frame) -> MouseZones {
 
 fn render_header(state: &AppState, frame: &mut Frame, area: Rect) {
     let scan_path = state.scan_path.to_string_lossy();
-    let stats = if state.phase == AppPhase::Scanning {
-        String::new()
+
+    // Measuring is checked before the reclaimable total: sizes stream in
+    // asynchronously, so a zero total mid-flight is "unknown", not "empty".
+    let (stats, stats_color) = if state.phase == AppPhase::Scanning {
+        (String::new(), theme::SELECT)
+    } else if state.sizes_total > 0 && !state.sizes_complete {
+        (
+            format!(
+                "  measuring sizes {}/{}",
+                state.sizes_found, state.sizes_total
+            ),
+            theme::CAUTION,
+        )
     } else if state.total_reclaimable == 0 {
-        String::from("  nothing to reclaim")
+        (String::from("  nothing found to clean"), theme::MUTED)
     } else {
-        format!(
-            "  {} reclaimable  |  scan {:.1}s",
-            humansize::format_size(state.total_reclaimable, humansize::BINARY),
-            state.scan_duration_ms as f64 / 1000.0,
+        (
+            format!(
+                "  {} you can free  \u{b7}  scanned in {:.1}s",
+                humansize::format_size(state.total_reclaimable, humansize::BINARY),
+                state.scan_duration_ms as f64 / 1000.0,
+            ),
+            theme::SELECT,
         )
     };
 
     let header = Line::from(vec![
         Span::styled(
-            format!(" dirsweep — {}", scan_path),
+            format!(" dirsweep \u{2014} {}", scan_path),
             Style::default()
                 .fg(theme::STRUCTURE)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(stats, Style::default().fg(theme::SELECT)),
+        Span::styled(stats, Style::default().fg(stats_color)),
     ]);
 
     frame.render_widget(Paragraph::new(header), area);
@@ -60,7 +74,7 @@ fn render_header(state: &AppState, frame: &mut Frame, area: Rect) {
 
 fn render_main(state: &AppState, frame: &mut Frame, area: Rect, zones: &mut MouseZones) {
     match state.phase {
-        AppPhase::Scanning => render_scanning(frame, area),
+        AppPhase::Scanning => render_scanning(state, frame, area),
         AppPhase::Browsing => {
             if state.errors.is_empty() {
                 render_browsing(state, frame, area, zones);
@@ -70,10 +84,16 @@ fn render_main(state: &AppState, frame: &mut Frame, area: Rect, zones: &mut Mous
                 render_browsing(state, frame, tree_area, zones);
                 render_errors(state, frame, error_area);
             }
+            // A finished sweep explains itself in place: a centered panel
+            // instead of a transient status-bar fragment that vanishes on the
+            // first keypress.
+            if let Some(ref summary) = state.delete_result_summary {
+                render_result_panel(summary, frame, area, zones);
+            }
         }
         AppPhase::ConfirmDelete => {
             render_browsing(state, frame, area, zones);
-            render_confirm_dialog(state, frame, area);
+            render_confirm_dialog(state, frame, area, zones);
         }
         AppPhase::Deleting => {
             render_browsing(state, frame, area, zones);
@@ -85,7 +105,7 @@ fn render_main(state: &AppState, frame: &mut Frame, area: Rect, zones: &mut Mous
         }
         AppPhase::OrderDialog => {
             render_browsing(state, frame, area, zones);
-            render_order_dialog(state, frame, area);
+            render_order_dialog(state, frame, area, zones);
         }
         AppPhase::Quit => {}
     }
@@ -115,17 +135,17 @@ fn render_errors(state: &AppState, frame: &mut Frame, area: Rect) {
     frame.render_widget(text, area);
 }
 
-fn render_scanning(frame: &mut Frame, area: Rect) {
+fn render_scanning(state: &AppState, frame: &mut Frame, area: Rect) {
     let text = Paragraph::new(Text::from(vec![
         Line::from(""),
         Line::from(Span::styled(
-            " Scanning...",
+            format!(" Scanning {} \u{2026}", state.scan_path.display()),
             Style::default()
                 .fg(theme::STRUCTURE)
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
-            " Walking directory tree for known build artifacts",
+            " Looking for build folders \u{2014} node_modules, target, build, dist, \u{2026}",
             Style::default().fg(theme::MUTED),
         )),
     ]))
@@ -137,9 +157,20 @@ fn render_scanning(frame: &mut Frame, area: Rect) {
 
 fn render_browsing(state: &AppState, frame: &mut Frame, area: Rect, zones: &mut MouseZones) {
     if state.tree.is_empty() {
-        let text = Paragraph::new(" No sweepable directories found.")
-            .style(Style::default().fg(theme::MUTED))
-            .block(Block::default());
+        let text = Paragraph::new(Text::from(vec![
+            Line::from(Span::styled(
+                format!(
+                    " No build folders found under {}.",
+                    state.scan_path.display()
+                ),
+                Style::default(),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                " Try sweeping a parent folder:  dirsweep --dir ~/projects",
+                theme::muted(),
+            )),
+        ]));
         frame.render_widget(text, area);
         return;
     }
@@ -298,9 +329,41 @@ fn relative_time(dt: DateTime<Utc>) -> String {
     }
 }
 
-fn render_confirm_dialog(state: &AppState, frame: &mut Frame, area: Rect) {
-    let dialog_width = 60.min(area.width.saturating_sub(4));
-    let dialog_height = 18.min(area.height.saturating_sub(4));
+/// How many content lines the chooser needs, given `entries` visible rows and
+/// whether a "more" overflow notice is shown.
+fn confirm_content_height(entries: usize, truncated: bool) -> usize {
+    // title + blank + entries + [more] + blank + total + blank + 3 options
+    // + blank + hint
+    9 + entries + usize::from(truncated)
+}
+
+fn render_confirm_dialog(state: &AppState, frame: &mut Frame, area: Rect, zones: &mut MouseZones) {
+    let selected: Vec<(&std::path::Path, u64)> = state
+        .tree
+        .iter()
+        .filter_map(|e| match e {
+            TreeEntry::TargetDir { path, size, .. } if state.selected.contains(path) => {
+                Some((path.as_path(), *size))
+            }
+            _ => None,
+        })
+        .collect();
+
+    // Size the dialog from its content, then clamp to the terminal. When the
+    // entries don't all fit, reserve a line for the "… and N more" notice
+    // instead of silently overflowing (long selections used to spill past
+    // the border).
+    let height_cap = area.height.saturating_sub(4);
+    let content_cap = height_cap.saturating_sub(2);
+    let entries_shown = if selected.len() + 9 <= content_cap as usize {
+        selected.len()
+    } else {
+        content_cap.saturating_sub(10) as usize
+    };
+    let truncated = selected.len() > entries_shown;
+    let content_height = confirm_content_height(entries_shown, truncated);
+    let dialog_width = 62.min(area.width.saturating_sub(4));
+    let dialog_height = ((content_height + 2) as u16).min(height_cap.max(3));
     let x = (area.width - dialog_width) / 2;
     let y = (area.height - dialog_height) / 2;
 
@@ -321,63 +384,111 @@ fn render_confirm_dialog(state: &AppState, frame: &mut Frame, area: Rect) {
         Line::from(""),
     ];
 
-    for entry in &state.tree {
-        if let TreeEntry::TargetDir { path, size, .. } = entry {
-            if !state.selected.contains(path) {
-                continue;
-            }
-            let dir_name = path
-                .file_name()
-                .map(|n| n.to_string_lossy())
-                .unwrap_or_default();
-            let size_str = humansize::format_size(*size, humansize::BINARY);
-            lines.push(Line::from(vec![
-                Span::styled("  \u{25CF} ", Style::default().fg(theme::SELECT)),
-                Span::styled(dir_name.to_string(), Style::default()),
-                Span::raw(format!("({})", size_str)),
-            ]));
-        }
+    for (path, size) in selected.iter().take(entries_shown) {
+        let dir_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy())
+            .unwrap_or_default();
+        lines.push(Line::from(vec![
+            Span::styled("  \u{25CF} ", Style::default().fg(theme::SELECT)),
+            Span::styled(dir_name.to_string(), Style::default()),
+            Span::raw(format!(
+                " ({})",
+                humansize::format_size(*size, humansize::BINARY)
+            )),
+        ]));
+    }
+    if truncated {
+        lines.push(Line::from(Span::styled(
+            format!("  \u{2026} and {} more", selected.len() - entries_shown),
+            theme::muted(),
+        )));
     }
 
-    let total_str = humansize::format_size(state.total_selected_size, humansize::BINARY);
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        format!("  Total: {}", total_str),
+        format!(
+            "  Total: {}",
+            humansize::format_size(state.total_selected_size, humansize::BINARY)
+        ),
         theme::emphasis(),
     )));
     lines.push(Line::from(""));
 
+    // One row per mode: the active mode carries the color of its
+    // consequence, but every mode stays visible with a plain-language
+    // description. The destructive option is the only red on screen.
     let variants = [
-        (DeletePreference::DryRun, "Dry run (show only)"),
-        (DeletePreference::Trash, "Trash (move to trash)"),
-        (DeletePreference::Permanent, "Permanent delete"),
+        DeletePreference::DryRun,
+        DeletePreference::Trash,
+        DeletePreference::Permanent,
     ];
 
-    for (variant, label) in &variants {
-        let is_active = *variant == state.delete_preference;
-        let bullet = if is_active { "\u{25CF}" } else { "\u{25CB}" };
-        let fg = if is_active {
-            theme::SELECT
-        } else {
-            Color::Reset
+    let options_start = lines.len();
+    for variant in &variants {
+        let active = *variant == state.delete_preference;
+        let bullet = if active { "\u{25CF}" } else { "\u{25CB}" };
+        let fg = match (*variant, active) {
+            (DeletePreference::Permanent, true) => theme::DANGER,
+            (_, true) => theme::SELECT,
+            (_, false) => Color::Reset,
         };
         lines.push(Line::from(vec![
             Span::raw("  "),
             Span::styled(
-                format!("{} {}", bullet, label),
-                Style::default().fg(fg).add_modifier(if is_active {
+                format!("{} {}", bullet, variant.label()),
+                Style::default().fg(fg).add_modifier(if active {
                     Modifier::BOLD
                 } else {
                     Modifier::empty()
                 }),
             ),
+            Span::raw("  "),
+            Span::styled(variant.description(), theme::muted()),
         ]));
     }
-    lines.push(Line::from(""));
+    let hint_index = lines.len();
     lines.push(Line::from(Span::styled(
-        " [Enter] confirm  [Esc] cancel  [\u{2191}/\u{2193}] toggle mode",
-        Style::default().fg(theme::MUTED),
+        " [\u{2191}/\u{2193}] choose  [Enter] confirm  [Esc] cancel",
+        theme::muted(),
     )));
+
+    // The chooser is fully clickable: mode rows pick a mode, the Enter and
+    // Esc hints act as confirm/cancel buttons for mouse-only users.
+    for (i, variant) in variants.iter().enumerate() {
+        zones.push((
+            Rect::new(
+                dialog_area.x,
+                dialog_area.y + 1 + (options_start + i) as u16,
+                dialog_area.width,
+                1,
+            ),
+            MouseAction::SetDeleteMode(*variant),
+        ));
+    }
+    let confirm_x = " [\u{2191}/\u{2193}] choose  ".len() as u16;
+    for (rect, action) in [
+        (
+            Rect::new(
+                dialog_area.x + confirm_x,
+                dialog_area.y + 1 + hint_index as u16,
+                "[Enter] confirm".len() as u16,
+                1,
+            ),
+            MouseAction::Confirm,
+        ),
+        (
+            Rect::new(
+                dialog_area.x + confirm_x + "[Enter] confirm".len() as u16 + 2,
+                dialog_area.y + 1 + hint_index as u16,
+                "[Esc] cancel".len() as u16,
+                1,
+            ),
+            MouseAction::Cancel,
+        ),
+    ] {
+        zones.push((rect, action));
+    }
 
     let dialog = Paragraph::new(Text::from(lines))
         .block(
@@ -424,6 +535,63 @@ fn render_confirm_quit_dialog(_state: &AppState, frame: &mut Frame, area: Rect) 
                 .style(Style::default().fg(theme::STRUCTURE)),
         )
         .alignment(Alignment::Center);
+
+    frame.render_widget(dialog, dialog_area);
+}
+
+/// Centered summary of a completed sweep. The border color carries the
+/// outcome at a glance: green for clean, red when anything failed. Clicking
+/// anywhere on the panel (or pressing any key) dismisses it.
+fn render_result_panel(summary: &str, frame: &mut Frame, area: Rect, zones: &mut MouseZones) {
+    let border_color = if summary.contains("failed") {
+        theme::DANGER
+    } else {
+        theme::SELECT
+    };
+
+    let title = if summary.contains("failed") {
+        " Sweep finished"
+    } else {
+        " Sweep complete"
+    };
+
+    let dialog_width = 60.min(area.width.saturating_sub(4));
+    let dialog_height = 7.min(area.height.saturating_sub(4).max(3));
+    let x = (area.width - dialog_width) / 2;
+    let y = (area.height - dialog_height) / 2;
+
+    let dialog_area = Rect {
+        x: area.x + x,
+        y: area.y + y,
+        width: dialog_width,
+        height: dialog_height,
+    };
+
+    frame.render_widget(Clear, dialog_area);
+
+    let lines = vec![
+        Line::from(Span::styled(title, theme::emphasis())),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!(" {}", summary),
+            Style::default()
+                .fg(border_color)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(" Press any key to continue", theme::muted())),
+    ];
+
+    zones.push((dialog_area, MouseAction::Dismiss));
+
+    let dialog = Paragraph::new(Text::from(lines))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .style(Style::default().fg(border_color)),
+        )
+        .alignment(Alignment::Left);
 
     frame.render_widget(dialog, dialog_area);
 }
@@ -599,9 +767,13 @@ fn render_button_bar(state: &AppState, frame: &mut Frame, area: Rect, zones: &mu
     );
 }
 
-fn render_order_dialog(state: &AppState, frame: &mut Frame, area: Rect) {
-    let dialog_width = 36.min(area.width.saturating_sub(4));
-    let dialog_height = 13.min(area.height.saturating_sub(4));
+fn render_order_dialog(state: &AppState, frame: &mut Frame, area: Rect, zones: &mut MouseZones) {
+    let variants = OrderBy::ALL;
+
+    // title + blank + one row per variant + blank + hint, plus borders.
+    let content_height = 3 + variants.len();
+    let dialog_width = 40.min(area.width.saturating_sub(4));
+    let dialog_height = ((content_height as u16) + 2).min(area.height.saturating_sub(4).max(3));
     let x = (area.width - dialog_width) / 2;
     let y = (area.height - dialog_height) / 2;
 
@@ -614,17 +786,8 @@ fn render_order_dialog(state: &AppState, frame: &mut Frame, area: Rect) {
 
     frame.render_widget(Clear, dialog_area);
 
-    let variants = [
-        OrderBy::NameAsc,
-        OrderBy::NameDesc,
-        OrderBy::DateAsc,
-        OrderBy::DateDesc,
-        OrderBy::SizeAsc,
-        OrderBy::SizeDesc,
-    ];
-
     let mut lines = vec![
-        Line::from(Span::styled(" Order by", theme::emphasis())),
+        Line::from(Span::styled(" Sort by", theme::emphasis())),
         Line::from(""),
     ];
 
@@ -650,10 +813,46 @@ fn render_order_dialog(state: &AppState, frame: &mut Frame, area: Rect) {
     }
 
     lines.push(Line::from(""));
+    let hint_index = lines.len();
     lines.push(Line::from(Span::styled(
-        " [Enter] apply  [Esc] cancel  [\u{2191}/\u{2193}] change",
-        Style::default().fg(theme::MUTED),
+        " [\u{2191}/\u{2193}] choose  [Enter] apply  [Esc] cancel",
+        theme::muted(),
     )));
+
+    for (i, variant) in variants.iter().enumerate() {
+        zones.push((
+            Rect::new(
+                dialog_area.x,
+                dialog_area.y + 1 + (2 + i) as u16,
+                dialog_area.width,
+                1,
+            ),
+            MouseAction::SortBy(*variant),
+        ));
+    }
+    let apply_x = " [\u{2191}/\u{2193}] choose  ".len() as u16;
+    for (rect, action) in [
+        (
+            Rect::new(
+                dialog_area.x + apply_x,
+                dialog_area.y + 1 + hint_index as u16,
+                "[Enter] apply".len() as u16,
+                1,
+            ),
+            MouseAction::Confirm,
+        ),
+        (
+            Rect::new(
+                dialog_area.x + apply_x + "[Enter] apply".len() as u16 + 2,
+                dialog_area.y + 1 + hint_index as u16,
+                "[Esc] cancel".len() as u16,
+                1,
+            ),
+            MouseAction::Cancel,
+        ),
+    ] {
+        zones.push((rect, action));
+    }
 
     let dialog = Paragraph::new(Text::from(lines))
         .block(
@@ -816,6 +1015,169 @@ mod tests {
         assert!(bar.contains("[Enter] Delete (2"), "{bar}");
         assert!(bar.contains("[q] Quit"), "{bar}");
         assert!(bar.contains("4/4"), "{bar}");
+    }
+
+    fn many_targets(n: usize) -> crate::scanner::ScanOutput {
+        use crate::scanner::{ProjectInfo, ScannedDir};
+        use chrono::Utc;
+        let mut children = Vec::new();
+        let mut dirs = Vec::new();
+        for i in 0..n {
+            let path = PathBuf::from(format!("/test/app/target-{:02}", i));
+            children.push(path.clone());
+            dirs.push(ScannedDir {
+                path,
+                size: 1_000,
+                last_modified: Utc::now(),
+                error: None,
+            });
+        }
+        crate::scanner::ScanOutput {
+            target_dirs: dirs,
+            projects: vec![ProjectInfo {
+                path: PathBuf::from("/test/app"),
+                name: "app".to_string(),
+                languages: vec!["js".to_string()],
+                children,
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn confirm_dialog_explains_each_mode_in_plain_language() {
+        let mut state = AppState::new(PathBuf::from("/test"));
+        state.build_tree(two_project_output());
+        state.phase = AppPhase::ConfirmDelete;
+        state.select_all();
+        // Default preference is Trash, the recommended mode.
+        assert_eq!(state.delete_preference, DeletePreference::Trash);
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+        let mut zones = MouseZones::new();
+        terminal
+            .draw(|f| {
+                zones = render(&state, f);
+            })
+            .unwrap();
+
+        let text: String = (0..20u16).map(|r| row(&terminal, r)).collect();
+        assert!(text.contains("Delete selected directories?"), "{text}");
+        assert!(text.contains("Preview only"), "{text}");
+        assert!(text.contains("Move to Trash"), "{text}");
+        assert!(text.contains("Delete permanently"), "{text}");
+        assert!(text.contains("cannot be undone"), "{text}");
+        assert!(text.contains("recoverable"), "{text}");
+        assert!(text.contains("Total"), "{text}");
+
+        // Each mode row is individually clickable.
+        for preference in [
+            DeletePreference::DryRun,
+            DeletePreference::Trash,
+            DeletePreference::Permanent,
+        ] {
+            assert!(
+                zones
+                    .iter()
+                    .any(|(_, a)| *a == MouseAction::SetDeleteMode(preference)),
+                "missing SetDeleteMode zone for {preference:?}"
+            );
+        }
+        assert!(zones.iter().any(|(_, a)| *a == MouseAction::Confirm));
+        assert!(zones.iter().any(|(_, a)| *a == MouseAction::Cancel));
+    }
+
+    #[test]
+    fn confirm_dialog_truncates_overflow_with_a_count() {
+        let mut state = AppState::new(PathBuf::from("/test"));
+        state.build_tree(many_targets(20));
+        state.phase = AppPhase::ConfirmDelete;
+        state.select_all();
+
+        let mut terminal = Terminal::new(TestBackend::new(60, 24)).unwrap();
+        let mut zones = MouseZones::new();
+        terminal
+            .draw(|f| {
+                zones = render(&state, f);
+            })
+            .unwrap();
+
+        let text: String = (0..24u16).map(|r| row(&terminal, r)).collect();
+        assert!(
+            text.contains("\u{2026} and 14 more"),
+            "expected a truncated-entries notice, got {text}"
+        );
+        // All three modes stay reachable even when entries don't fit.
+        assert!(text.contains("Delete permanently"), "{text}");
+        assert!(
+            zones
+                .iter()
+                .any(|(_, a)| matches!(a, MouseAction::SetDeleteMode(_)))
+        );
+    }
+
+    #[test]
+    fn result_panel_announces_the_outcome_and_dismisses_on_click() {
+        let mut state = AppState::new(PathBuf::from("/test"));
+        state.build_tree(two_project_output());
+        state.phase = AppPhase::Browsing;
+        state.delete_result_summary = Some(String::from(
+            "Done! 2 directory(ies) deleted, 2.9 MiB reclaimed",
+        ));
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+        let mut zones = MouseZones::new();
+        terminal
+            .draw(|f| {
+                zones = render(&state, f);
+            })
+            .unwrap();
+
+        let text: String = (0..20u16).map(|r| row(&terminal, r)).collect();
+        assert!(text.contains("Sweep complete"), "{text}");
+        assert!(text.contains("2 directory(ies) deleted"), "{text}");
+        assert!(text.contains("Press any key"), "{text}");
+        assert!(zones.iter().any(|(_, a)| *a == MouseAction::Dismiss));
+
+        // Failures flip the panel to its caution variant.
+        state.delete_result_summary = Some(String::from("Done! 1 deleted, 1 failed"));
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+        terminal
+            .draw(|f| {
+                let _ = render(&state, f);
+            })
+            .unwrap();
+        let text: String = (0..20u16).map(|r| row(&terminal, r)).collect();
+        assert!(text.contains("Sweep finished"), "{text}");
+    }
+
+    #[test]
+    fn sort_dialog_lists_orders_and_registers_zones() {
+        let mut state = AppState::new(PathBuf::from("/test"));
+        state.build_tree(two_project_output());
+        state.phase = AppPhase::OrderDialog;
+        state.order_cursor = OrderBy::SizeDesc;
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+        let mut zones = MouseZones::new();
+        terminal
+            .draw(|f| {
+                zones = render(&state, f);
+            })
+            .unwrap();
+
+        let text: String = (0..20u16).map(|r| row(&terminal, r)).collect();
+        assert!(text.contains("Sort by"), "{text}");
+        assert!(text.contains("Largest first"), "{text}");
+
+        for order in OrderBy::ALL {
+            assert!(
+                zones.iter().any(|(_, a)| *a == MouseAction::SortBy(order)),
+                "missing SortBy zone for {order:?}"
+            );
+        }
+        assert!(zones.iter().any(|(_, a)| *a == MouseAction::Confirm));
+        assert!(zones.iter().any(|(_, a)| *a == MouseAction::Cancel));
     }
 
     #[test]

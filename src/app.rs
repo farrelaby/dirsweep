@@ -27,6 +27,18 @@ pub enum MouseAction {
     /// Open the delete confirmation (no-op with an empty selection).
     Delete,
     Quit,
+    /// Confirm the active dialog (Enter equivalent).
+    Confirm,
+    /// Cancel the active dialog (Esc equivalent).
+    Cancel,
+    /// Pick a mode in the delete chooser.
+    SetDeleteMode(DeletePreference),
+    /// Pick a sort order in the sort dialog (cursor only).
+    SortBy(OrderBy),
+    /// Apply the picked sort order.
+    ApplySort,
+    /// Dismiss a transient overlay (result notice, later: help).
+    Dismiss,
 }
 
 /// Clickable regions of the most recently rendered frame.
@@ -60,7 +72,65 @@ pub enum OrderBy {
     SizeDesc,
 }
 
+impl DeletePreference {
+    pub fn label(&self) -> &'static str {
+        match self {
+            DeletePreference::DryRun => "Preview only",
+            DeletePreference::Trash => "Move to Trash",
+            DeletePreference::Permanent => "Delete permanently",
+        }
+    }
+
+    pub fn description(&self) -> &'static str {
+        match self {
+            DeletePreference::DryRun => "show what would be deleted, change nothing",
+            DeletePreference::Trash => "recoverable \u{b7} recommended",
+            DeletePreference::Permanent => "cannot be undone",
+        }
+    }
+
+    /// Mode below the current one, without wrapping. The wrap historically
+    /// sent `Up` from "Preview" straight to the destructive option — the one
+    /// navigation a first-time user must never trip into.
+    pub fn step_back(self) -> Self {
+        match self {
+            DeletePreference::DryRun => DeletePreference::DryRun,
+            DeletePreference::Trash => DeletePreference::DryRun,
+            DeletePreference::Permanent => DeletePreference::Trash,
+        }
+    }
+
+    /// Mode above the current one, without wrapping.
+    pub fn step_forward(self) -> Self {
+        match self {
+            DeletePreference::DryRun => DeletePreference::Trash,
+            DeletePreference::Trash => DeletePreference::Permanent,
+            DeletePreference::Permanent => DeletePreference::Permanent,
+        }
+    }
+}
+
 impl OrderBy {
+    /// Display order of the sort dialog, top to bottom.
+    pub const ALL: [OrderBy; 6] = [
+        OrderBy::NameAsc,
+        OrderBy::NameDesc,
+        OrderBy::DateAsc,
+        OrderBy::DateDesc,
+        OrderBy::SizeAsc,
+        OrderBy::SizeDesc,
+    ];
+
+    /// Clamped step within [`OrderBy::ALL`]: +1 down, -1 up, never wrapping.
+    pub fn step(self, delta: isize) -> Self {
+        let position = Self::ALL
+            .iter()
+            .position(|o| *o == self)
+            .unwrap_or_default();
+        let next = (position as isize + delta).clamp(0, Self::ALL.len() as isize - 1);
+        Self::ALL[next as usize]
+    }
+
     pub fn label(&self) -> &str {
         match self {
             OrderBy::NameAsc => "Name (A \u{2192} Z)",
@@ -946,6 +1016,35 @@ mod tests {
 
         state.jump_to(99);
         assert_eq!(state.list_index, 2, "out-of-range jumps are ignored");
+    }
+
+    #[test]
+    fn test_delete_preference_steps_clamp_without_wrapping() {
+        use DeletePreference::{DryRun, Permanent, Trash};
+        assert_eq!(DryRun.step_back(), DryRun, "Up at the top must stay put");
+        assert_eq!(DryRun.step_forward(), Trash);
+        assert_eq!(Trash.step_back(), DryRun);
+        assert_eq!(Trash.step_forward(), Permanent);
+        assert_eq!(
+            Permanent.step_forward(),
+            Permanent,
+            "Down at the bottom must stay put"
+        );
+        assert_eq!(Permanent.step_back(), Trash);
+    }
+
+    #[test]
+    fn test_order_by_step_clamps_without_wrapping() {
+        use OrderBy::{DateAsc, NameAsc, NameDesc, SizeDesc};
+        assert_eq!(NameAsc.step(-1), NameAsc, "Up at the top must stay put");
+        assert_eq!(NameAsc.step(1), NameDesc);
+        assert_eq!(NameAsc.step(100), SizeDesc, "large steps clamp to the end");
+        assert_eq!(
+            SizeDesc.step(1),
+            SizeDesc,
+            "Down at the bottom must stay put"
+        );
+        assert_eq!(DateAsc.step(-1), NameDesc);
     }
 
     #[test]
