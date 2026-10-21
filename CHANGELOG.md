@@ -18,6 +18,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Test asserting hidden files inside a target dir count toward its size — guards against walkers that skip dotfiles by default, which would otherwise underreport silently
 - Recognition of legacy Bun lockfile `bun.lockb` (`config.rs`)
 - Fallback error in `detect_target` for unsupported platforms (`commands.rs`)
+- Cryptographic SHA-256 verification of downloaded binary archives against `checksums.txt` in npm postinstall (`npm/install.js`)
+- Pre-publish version check in CI release workflow ensuring `Cargo.toml` matches git release tag (`release.yml`)
 
 ### Changed
 - CI clippy now lints all targets (`--all-targets`), covering benches
@@ -47,6 +49,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Prevented spurious `ENOENT` read errors when background size walk races with active deletion (`main.rs`)
 - In-process pure Rust SHA-256 calculation for self-update, eliminating external `sha256sum`/PowerShell dependencies and fixing macOS updates (`commands.rs`)
 - Enforced mandatory checksum verification and added CRLF/asterisk support in checksum parser (`commands.rs`)
+- Enforced HTTPS protocol in npm installer, rejecting plaintext HTTP downloads and redirects (`npm/install.js`)
+- Hardened Windows PowerShell extraction parameters in npm installer to prevent argument injection (`npm/install.js`)
+- Disabled draft releases in GitHub Actions so release assets are immediately downloadable upon npm publish (`release.yml`)
 
 ### Changed
 - Tree list now shows a blank row between project groups for visual separation
