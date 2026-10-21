@@ -2,45 +2,16 @@ use chrono::{DateTime, Utc};
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Layout, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
 
 use crate::app::{AppPhase, AppState, DeletePreference, OrderBy, TreeEntry};
-
-mod palette {
-    use ratatui::style::Color;
-
-    pub const BG: Color = Color::Black;
-    pub const HEADER: Color = Color::Rgb(180, 200, 255);
-    pub const STATUS: Color = Color::Rgb(180, 220, 200);
-    pub const NOTIFY: Color = Color::Rgb(80, 220, 120);
-
-    pub const PROJECT: Color = Color::Rgb(100, 200, 255);
-    pub const SELECTED: Color = Color::Rgb(80, 255, 120);
-    pub const SIZE: Color = Color::Rgb(255, 220, 80);
-    pub const TIME: Color = Color::Rgb(160, 165, 175);
-    pub const HIGHLIGHT: Color = Color::Rgb(255, 200, 100);
-
-    pub const DIALOG_BORDER: Color = Color::Rgb(100, 160, 220);
-    pub const DIALOG_TITLE: Color = Color::White;
-    pub const DIALOG_TEXT: Color = Color::Rgb(220, 220, 220);
-    pub const DIALOG_HINT: Color = Color::Rgb(160, 165, 175);
-
-    pub const ERROR: Color = Color::Rgb(255, 180, 60);
-    pub const ERROR_BORDER: Color = Color::Rgb(220, 140, 60);
-
-    pub const SCANNING: Color = Color::Rgb(100, 220, 255);
-    pub const DELETING: Color = Color::Rgb(255, 220, 80);
-}
+use crate::theme;
 
 pub fn render(state: &AppState, frame: &mut Frame) {
-    frame.render_widget(
-        Block::default().style(Style::default().bg(palette::BG)),
-        frame.area(),
-    );
-
+    // No background paint: the terminal's own theme shows through.
     let areas = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),
@@ -71,10 +42,10 @@ fn render_header(state: &AppState, frame: &mut Frame, area: Rect) {
         Span::styled(
             format!(" dirsweep — {}", scan_path),
             Style::default()
-                .fg(palette::HEADER)
+                .fg(theme::STRUCTURE)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(stats, Style::default().fg(palette::SELECTED)),
+        Span::styled(stats, Style::default().fg(theme::SELECT)),
     ]);
 
     frame.render_widget(Paragraph::new(header), area);
@@ -120,7 +91,7 @@ fn render_errors(state: &AppState, frame: &mut Frame, area: Rect) {
         .map(|e| {
             Line::from(Span::styled(
                 format!(" \u{26A0} {}", e),
-                Style::default().fg(palette::ERROR),
+                Style::default().fg(theme::DANGER),
             ))
         })
         .collect();
@@ -130,7 +101,7 @@ fn render_errors(state: &AppState, frame: &mut Frame, area: Rect) {
             Block::default()
                 .borders(Borders::TOP)
                 .title(" Errors")
-                .style(Style::default().fg(palette::ERROR_BORDER)),
+                .style(Style::default().fg(theme::DANGER)),
         )
         .scroll((0, 0));
 
@@ -143,12 +114,12 @@ fn render_scanning(frame: &mut Frame, area: Rect) {
         Line::from(Span::styled(
             " Scanning...",
             Style::default()
-                .fg(palette::SCANNING)
+                .fg(theme::STRUCTURE)
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
             " Walking directory tree for known build artifacts",
-            Style::default().fg(palette::TIME),
+            Style::default().fg(theme::MUTED),
         )),
     ]))
     .style(Style::default())
@@ -160,7 +131,7 @@ fn render_scanning(frame: &mut Frame, area: Rect) {
 fn render_browsing(state: &AppState, frame: &mut Frame, area: Rect) {
     if state.tree.is_empty() {
         let text = Paragraph::new(" No sweepable directories found.")
-            .style(Style::default().fg(palette::TIME))
+            .style(Style::default().fg(theme::MUTED))
             .block(Block::default());
         frame.render_widget(text, area);
         return;
@@ -187,8 +158,8 @@ fn render_browsing(state: &AppState, frame: &mut Frame, area: Rect) {
     let max_path_width = state.max_path_width();
 
     // Use table alignment only when terminal has enough room.
-    // Overhead: highlight(2) + prefix(3) + checkbox(3) + spaces(3) + max_size(8) + max_time(12) + margin(2)
-    let use_alignment = max_path_width + 33 <= area.width as usize;
+    // Overhead: prefix(3) + checkbox(3) + spaces(3) + max_size(8) + max_time(12) + margin(2)
+    let use_alignment = max_path_width + 31 <= area.width as usize;
 
     let mut items: Vec<ListItem> = Vec::new();
     let mut selected_row = 0;
@@ -210,7 +181,7 @@ fn render_browsing(state: &AppState, frame: &mut Frame, area: Rect) {
 
                 let text = Line::from(vec![Span::styled(
                     format!("  {}{}", name, lang_str),
-                    Style::default().fg(palette::PROJECT),
+                    Style::default().fg(theme::STRUCTURE),
                 )]);
                 ListItem::new(text)
             }
@@ -239,7 +210,7 @@ fn render_browsing(state: &AppState, frame: &mut Frame, area: Rect) {
 
                 let selected_style = if state.selected.contains(path) {
                     Style::default()
-                        .fg(palette::SELECTED)
+                        .fg(theme::SELECT)
                         .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
@@ -253,9 +224,9 @@ fn render_browsing(state: &AppState, frame: &mut Frame, area: Rect) {
                         Span::raw(" "),
                         Span::styled(padded_path, selected_style),
                         Span::raw(" "),
-                        Span::styled(sized_str, Style::default().fg(palette::SIZE)),
+                        Span::raw(sized_str),
                         Span::raw(" "),
-                        Span::styled(modified, Style::default().fg(palette::TIME)),
+                        Span::styled(modified, Style::default().fg(theme::MUTED)),
                     ]);
                     ListItem::new(text)
                 } else {
@@ -265,9 +236,9 @@ fn render_browsing(state: &AppState, frame: &mut Frame, area: Rect) {
                         Span::raw(" "),
                         Span::styled(path_str, selected_style),
                         Span::raw(" "),
-                        Span::styled(sized_str, Style::default().fg(palette::SIZE)),
+                        Span::raw(sized_str),
                         Span::raw(" "),
-                        Span::styled(modified, Style::default().fg(palette::TIME)),
+                        Span::styled(modified, Style::default().fg(theme::MUTED)),
                     ]);
                     ListItem::new(text)
                 }
@@ -287,12 +258,7 @@ fn render_browsing(state: &AppState, frame: &mut Frame, area: Rect) {
 
     let list = List::new(items)
         .block(Block::default())
-        .highlight_style(
-            Style::default()
-                .fg(palette::HIGHLIGHT)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("\u{25B6} ");
+        .highlight_style(theme::cursor());
 
     frame.render_stateful_widget(list, area, &mut list_state);
 }
@@ -334,9 +300,7 @@ fn render_confirm_dialog(state: &AppState, frame: &mut Frame, area: Rect) {
     let mut lines = vec![
         Line::from(Span::styled(
             " Delete selected directories?",
-            Style::default()
-                .fg(palette::DIALOG_TITLE)
-                .add_modifier(Modifier::BOLD),
+            theme::emphasis(),
         )),
         Line::from(""),
     ];
@@ -352,16 +316,9 @@ fn render_confirm_dialog(state: &AppState, frame: &mut Frame, area: Rect) {
                 .unwrap_or_default();
             let size_str = humansize::format_size(*size, humansize::BINARY);
             lines.push(Line::from(vec![
-                Span::styled("  \u{25CF} ", Style::default().fg(palette::SELECTED)),
-                Span::styled(
-                    dir_name.to_string(),
-                    Style::default().fg(palette::DIALOG_TEXT),
-                ),
-                Span::raw(" "),
-                Span::styled(
-                    format!("({})", size_str),
-                    Style::default().fg(palette::SIZE),
-                ),
+                Span::styled("  \u{25CF} ", Style::default().fg(theme::SELECT)),
+                Span::styled(dir_name.to_string(), Style::default()),
+                Span::raw(format!("({})", size_str)),
             ]));
         }
     }
@@ -370,9 +327,7 @@ fn render_confirm_dialog(state: &AppState, frame: &mut Frame, area: Rect) {
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         format!("  Total: {}", total_str),
-        Style::default()
-            .fg(palette::DIALOG_TITLE)
-            .add_modifier(Modifier::BOLD),
+        theme::emphasis(),
     )));
     lines.push(Line::from(""));
 
@@ -386,9 +341,9 @@ fn render_confirm_dialog(state: &AppState, frame: &mut Frame, area: Rect) {
         let is_active = *variant == state.delete_preference;
         let bullet = if is_active { "\u{25CF}" } else { "\u{25CB}" };
         let fg = if is_active {
-            palette::SELECTED
+            theme::SELECT
         } else {
-            palette::DIALOG_TEXT
+            Color::Reset
         };
         lines.push(Line::from(vec![
             Span::raw("  "),
@@ -405,7 +360,7 @@ fn render_confirm_dialog(state: &AppState, frame: &mut Frame, area: Rect) {
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         " [Enter] confirm  [Esc] cancel  [\u{2191}/\u{2193}] toggle mode",
-        Style::default().fg(palette::DIALOG_HINT),
+        Style::default().fg(theme::MUTED),
     )));
 
     let dialog = Paragraph::new(Text::from(lines))
@@ -413,7 +368,7 @@ fn render_confirm_dialog(state: &AppState, frame: &mut Frame, area: Rect) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
-                .style(Style::default().fg(palette::DIALOG_BORDER)),
+                .style(Style::default().fg(theme::STRUCTURE)),
         )
         .alignment(Alignment::Left);
 
@@ -437,16 +392,11 @@ fn render_confirm_quit_dialog(_state: &AppState, frame: &mut Frame, area: Rect) 
 
     let lines = vec![
         Line::from(""),
-        Line::from(Span::styled(
-            " Quit?",
-            Style::default()
-                .fg(palette::DIALOG_TITLE)
-                .add_modifier(Modifier::BOLD),
-        )),
+        Line::from(Span::styled(" Quit?", theme::emphasis())),
         Line::from(""),
         Line::from(Span::styled(
             " [Enter] confirm  [Esc] cancel",
-            Style::default().fg(palette::DIALOG_HINT),
+            Style::default().fg(theme::MUTED),
         )),
     ];
 
@@ -455,7 +405,7 @@ fn render_confirm_quit_dialog(_state: &AppState, frame: &mut Frame, area: Rect) 
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
-                .style(Style::default().fg(palette::DIALOG_BORDER)),
+                .style(Style::default().fg(theme::STRUCTURE)),
         )
         .alignment(Alignment::Center);
 
@@ -494,18 +444,15 @@ fn render_deleting(state: &AppState, frame: &mut Frame, area: Rect) {
         Line::from(Span::styled(
             " Deleting...",
             Style::default()
-                .fg(palette::DELETING)
+                .fg(theme::CAUTION)
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
-        Line::from(Span::styled(
-            format!("  {}", current),
-            Style::default().fg(palette::DIALOG_TEXT),
-        )),
+        Line::from(Span::styled(format!("  {}", current), Style::default())),
         Line::from(""),
         Line::from(Span::styled(
             format!("  {} complete", progress),
-            Style::default().fg(palette::TIME),
+            Style::default().fg(theme::MUTED),
         )),
     ];
 
@@ -514,7 +461,7 @@ fn render_deleting(state: &AppState, frame: &mut Frame, area: Rect) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
-                .style(Style::default().fg(palette::DIALOG_BORDER)),
+                .style(Style::default().fg(theme::STRUCTURE)),
         )
         .alignment(Alignment::Left);
 
@@ -528,13 +475,13 @@ fn render_status_bar(state: &AppState, frame: &mut Frame, area: Rect) {
                 Span::styled(
                     format!(" {}", summary),
                     Style::default()
-                        .fg(palette::NOTIFY)
+                        .fg(theme::SELECT)
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(" "),
                 Span::styled(
                     format!("  {}/{}", state.list_index + 1, state.tree.len()),
-                    Style::default().fg(palette::STATUS),
+                    Style::default().fg(theme::MUTED),
                 ),
             ]);
             let status = Paragraph::new(text);
@@ -562,9 +509,9 @@ fn render_status_bar(state: &AppState, frame: &mut Frame, area: Rect) {
         };
 
         let text = Line::from(vec![
-            Span::styled(hints, Style::default().fg(palette::STATUS)),
+            Span::styled(hints, Style::default().fg(theme::MUTED)),
             Span::raw(" "),
-            Span::styled(extra, Style::default().fg(palette::STATUS)),
+            Span::styled(extra, Style::default().fg(theme::MUTED)),
         ]);
 
         let status = Paragraph::new(text);
@@ -597,12 +544,7 @@ fn render_order_dialog(state: &AppState, frame: &mut Frame, area: Rect) {
     ];
 
     let mut lines = vec![
-        Line::from(Span::styled(
-            " Order by",
-            Style::default()
-                .fg(palette::DIALOG_TITLE)
-                .add_modifier(Modifier::BOLD),
-        )),
+        Line::from(Span::styled(" Order by", theme::emphasis())),
         Line::from(""),
     ];
 
@@ -610,9 +552,9 @@ fn render_order_dialog(state: &AppState, frame: &mut Frame, area: Rect) {
         let is_active = *variant == state.order_cursor;
         let bullet = if is_active { "\u{25CF}" } else { "\u{25CB}" };
         let fg = if is_active {
-            palette::SELECTED
+            theme::SELECT
         } else {
-            palette::DIALOG_TEXT
+            Color::Reset
         };
         lines.push(Line::from(vec![
             Span::raw("  "),
@@ -630,7 +572,7 @@ fn render_order_dialog(state: &AppState, frame: &mut Frame, area: Rect) {
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         " [Enter] apply  [Esc] cancel  [\u{2191}/\u{2193}] change",
-        Style::default().fg(palette::DIALOG_HINT),
+        Style::default().fg(theme::MUTED),
     )));
 
     let dialog = Paragraph::new(Text::from(lines))
@@ -638,7 +580,7 @@ fn render_order_dialog(state: &AppState, frame: &mut Frame, area: Rect) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
-                .style(Style::default().fg(palette::DIALOG_BORDER)),
+                .style(Style::default().fg(theme::STRUCTURE)),
         )
         .alignment(Alignment::Left);
 
@@ -701,6 +643,18 @@ mod tests {
             .collect()
     }
 
+    fn reversed_rows(term: &Terminal<TestBackend>) -> Vec<u16> {
+        let buf = term.backend().buffer();
+        (0..buf.area.height)
+            .filter(|&r| {
+                (0..buf.area.width).any(|x| {
+                    buf.cell((x, r))
+                        .is_some_and(|c| c.style().add_modifier.contains(Modifier::REVERSED))
+                })
+            })
+            .collect()
+    }
+
     #[test]
     fn tree_render_has_spacer_and_glyphs_and_cursor() {
         let mut state = AppState::new(PathBuf::from("/test"));
@@ -726,13 +680,11 @@ mod tests {
             row(&terminal, first_dir_row).contains('\u{2514}'),
             "first group's only child should be last-glyph"
         );
-        let cursor_rows: Vec<_> = (0..20u16)
-            .filter(|&r| row(&terminal, r).contains('\u{25B6}'))
-            .collect();
+        let cursor_rows: Vec<_> = reversed_rows(&terminal);
         assert_eq!(
             cursor_rows.len(),
             1,
-            "expected exactly one cursor highlight"
+            "expected exactly one reverse-video cursor row"
         );
         assert!(row(&terminal, cursor_rows[0]).contains("app-b/node_modules"));
     }
