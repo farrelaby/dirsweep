@@ -38,7 +38,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Header and states speak plainly: "X you can free · scanned in Ys", "measuring sizes n/m" while sizes stream in, "nothing found to clean" when the scan comes back empty, an explanatory scanning screen, a guided empty state, and a centered result panel after each sweep instead of a transient status-bar line
 - `q`, `Esc`, and `Ctrl-C` quit immediately: nothing destructive happens on close, so the quit confirmation dialog was removed
 - Sort dialog relabeled "Order by" → "Sort by"; all existing keybindings preserved (`Space`, `a`, `d`, `o`, `Enter`, `?` is the only newly added key)
-- Sort options display their number (`1`–`6`), and pressing that digit in the dialog jumps straight to the option — Enter still applies the sort
+- Sort options display their number (`1`–`6`), and pressing that digit in the dialog jumps straight to the option — Enter still applies
+- Project groups in the tree are no longer separated by a blank spacer row; color and bold alone mark the group boundaries, keeping the list one row tighter per group the sort
 
 - The cursor position in the action bar now counts sweepable directories only; it used to include project headers, so the first directory in a two-project scan read "3/4" instead of "1/2"
 
