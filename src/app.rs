@@ -204,6 +204,10 @@ pub struct AppState {
     pub deleting_index: usize,
     pub deleting_failed: Vec<PathBuf>,
     pub target_index: HashMap<PathBuf, usize>,
+    /// Number of sweepable targets in the tree, cached like
+    /// `max_path_width`: the position counter and nothing else needs it, and
+    /// its inputs change only when the tree does.
+    target_count: usize,
     max_path_width: usize,
 }
 
@@ -232,6 +236,7 @@ impl AppState {
             deleting_index: 0,
             deleting_failed: Vec::new(),
             target_index: HashMap::new(),
+            target_count: 0,
             max_path_width: 0,
         }
     }
@@ -300,6 +305,7 @@ impl AppState {
                 }
             })
             .sum();
+        self.recompute_target_count();
         self.rebuild_target_index();
         self.recompute_max_path_width();
         self.clamp_index();
@@ -373,6 +379,39 @@ impl AppState {
         self.selected.len()
     }
 
+    /// Number of sweepable targets in the tree (project headers excluded).
+    pub fn target_count(&self) -> usize {
+        self.target_count
+    }
+
+    /// 1-based position of the cursor among sweepable targets.
+    ///
+    /// Counts the `TargetDir` entries at or before `list_index`: navigation
+    /// skips headers and mouse clicks can rest on one, so the number holds
+    /// still over a group header instead of counting it. A cursor before the
+    /// first target reports 0.
+    pub fn target_position(&self) -> usize {
+        if self.tree.is_empty() {
+            return 0;
+        }
+        let upto = self.list_index.min(self.tree.len() - 1);
+        self.tree[..=upto]
+            .iter()
+            .filter(|e| matches!(e, TreeEntry::TargetDir { .. }))
+            .count()
+    }
+
+    /// Refresh the cached target count. Called wherever the tree gains or
+    /// loses entries; reordering (`order_tree`) must not recompute it — the
+    /// count is unchanged.
+    fn recompute_target_count(&mut self) {
+        self.target_count = self
+            .tree
+            .iter()
+            .filter(|e| matches!(e, TreeEntry::TargetDir { .. }))
+            .count();
+    }
+
     /// Move the cursor onto a specific tree entry (mouse row click).
     pub fn jump_to(&mut self, index: usize) {
         if index < self.tree.len() {
@@ -429,6 +468,7 @@ impl AppState {
                 }
             })
             .sum();
+        self.recompute_target_count();
         self.rebuild_target_index();
         self.recompute_max_path_width();
         self.clamp_index();
@@ -1018,6 +1058,66 @@ mod tests {
 
         state.jump_to(99);
         assert_eq!(state.list_index, 2, "out-of-range jumps are ignored");
+    }
+
+    /// Tree layout: [0] header, [1] node_modules, [2] header, [3] .next.
+    /// Tree layout with two projects: [0] header, [1] target, [2] header,
+    /// [3] target — the layout that exposes header-counting mistakes.
+    fn two_project_scan_output() -> ScanOutput {
+        let mk = |name: &str| ProjectInfo {
+            path: PathBuf::from(format!("/test/{name}")),
+            name: name.to_string(),
+            languages: vec!["js".to_string()],
+            children: vec![PathBuf::from(format!("/test/{name}/node_modules"))],
+        };
+
+        ScanOutput {
+            target_dirs: vec![
+                ScannedDir {
+                    path: PathBuf::from("/test/app-a/node_modules"),
+                    size: 1_000,
+                    last_modified: Utc::now(),
+                    error: None,
+                },
+                ScannedDir {
+                    path: PathBuf::from("/test/app-b/node_modules"),
+                    size: 2_000,
+                    last_modified: Utc::now(),
+                    error: None,
+                },
+            ],
+            projects: vec![mk("app-a"), mk("app-b")],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_target_position_counts_targets_only() {
+        let mut state = AppState::new(PathBuf::from("/test"));
+        state.build_tree(two_project_scan_output());
+        assert_eq!(state.target_count(), 2);
+
+        // Tree: [0] header, [1] target, [2] header, [3] target.
+        state.list_index = 1;
+        assert_eq!(state.target_position(), 1);
+
+        // A mouse click resting on a header holds the previous number
+        // instead of counting the header.
+        state.list_index = 2;
+        assert_eq!(state.target_position(), 1);
+
+        state.list_index = 3;
+        assert_eq!(state.target_position(), 2);
+
+        state.list_index = 0;
+        assert_eq!(state.target_position(), 0, "before the first target");
+
+        // Deleting entries shrinks the count together with the tree.
+        state.list_index = 1;
+        state.toggle_selection();
+        state.remove_deleted_from_tree();
+        assert_eq!(state.target_count(), 1);
+        assert_eq!(state.target_position(), 1);
     }
 
     #[test]

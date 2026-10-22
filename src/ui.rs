@@ -693,11 +693,13 @@ fn render_button_bar(state: &AppState, frame: &mut Frame, area: Rect, zones: &mu
     }
 
     // Position indicator on the right, with a two-column gap from the buttons.
-    let total = state.tree.len();
+    // Counts sweepable targets only: project headers are group titles the
+    // navigation skips, not rows the user can act on.
+    let total = state.target_count();
     let pos = if total == 0 {
         String::from("0/0")
     } else {
-        format!("{}/{}", state.list_index + 1, total)
+        format!("{}/{}", state.target_position(), total)
     };
 
     let selected = state.selection_count();
@@ -1050,7 +1052,8 @@ mod tests {
         assert!(bar.contains("[Space] Toggle"), "{bar}");
         assert!(bar.contains("[Enter] Delete (2"), "{bar}");
         assert!(bar.contains("[q] Quit"), "{bar}");
-        assert!(bar.contains("4/4"), "{bar}");
+        // Position counts targets only: 4 tree entries, 2 of them headers.
+        assert!(bar.contains("2/2"), "{bar}");
     }
 
     fn many_targets(n: usize) -> crate::scanner::ScanOutput {

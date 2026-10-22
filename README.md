@@ -82,7 +82,7 @@ dirsweep uninstall --force  # skip confirmation
    my-other-app (npm)
      [ ] .next           350 MiB   just now
 
- [Space] Toggle  [a] All  [d] None  [o] Sort  [?] Help  [Enter] Delete (3 · 6.50 GiB)  [q] Quit   1/6
+ [Space] Toggle  [a] All  [d] None  [o] Sort  [?] Help  [Enter] Delete (3 · 6.50 GiB)  [q] Quit   1/4
 ```
 
 Everything on the bar is clickable — and so are the rows and the dialog

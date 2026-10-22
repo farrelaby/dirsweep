@@ -38,6 +38,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - `q`, `Esc`, and `Ctrl-C` quit immediately: nothing destructive happens on close, so the quit confirmation dialog was removed
 - Sort dialog relabeled "Order by" → "Sort by"; all existing keybindings preserved (`Space`, `a`, `d`, `o`, `Enter`, `?` is the only newly added key)
 
+- The cursor position in the action bar now counts sweepable directories only; it used to include project headers, so the first directory in a two-project scan read "3/4" instead of "1/2"
+
 ### Performance
 - `pipeline/many-tiny` 34.76 ms → 9.43 ms (−72.9%, 3.7×), in two independent steps: `build_tree` 20.11 ms → 0.44 ms (−97.8%), then pass 1 across dua-core's pool 13.65 ms → 8.57 ms (−37%)
 - `pipeline/deep-nesting` 4.50 ms → 3.01 ms (−33.2%)
