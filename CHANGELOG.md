@@ -20,15 +20,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Fallback error in `detect_target` for unsupported platforms (`commands.rs`)
 - Cryptographic SHA-256 verification of downloaded binary archives against `checksums.txt` in npm postinstall (`npm/install.js`)
 - Pre-publish version check in CI release workflow ensuring `Cargo.toml` matches git release tag (`release.yml`)
+- Clickable action bar where every command is a visible button that still names its keyboard shortcut, plus full mouse support: click rows to toggle, click headers to move the cursor, mouse-wheel scrolling, and clickable dialog options and hints
+- `?` help overlay listing every key and button in plain language, grouped by purpose, also reachable from the bar's `[?] Help` button
+- Semantic theme module (`src/theme.rs`) with one color per meaning; the delete chooser describes each mode's consequence in plain words, and the interface now has a proper visual hierarchy (danger is red, in-progress is amber, metadata is muted)
+- `Home`/`End` jump the cursor to the first/last sweepable directory, and `PageUp`/`PageDown` jump half a screen at a time (documented in the help overlay)
 
 ### Changed
 - CI clippy now lints all targets (`--all-targets`), covering benches
-- `[profile.bench]` sets `opt-level = 3`, overriding the release `-z`, so benchmarks isolate algorithmic change from optimizer behaviour
-- `build_tree` indexes target dirs in a `HashMap` once instead of rescanning them per project, taking it from O(projects × targets) to O(projects + targets)
+- `[profile.bench]` sets `opt-level = 3`, overriding the release `-z`, so benchmarks isolate algorithmic change from optimizer behaviour- `build_tree` indexes target dirs in a `HashMap` once instead of rescanning them per project, taking it from O(projects × targets) to O(projects + targets)
 - The size worker fans target walks out across rayon rather than walking every target sequentially on one thread; results still stream per target so the UI fills in progressively
 - Benchmark comparison uses `--baseline-lenient` instead of `--baseline`, so adding a benchmark group no longer breaks every subsequent comparison
 - Pass 1 walks with `dua-core` across a work-stealing pool instead of one sequential `walkdir` traversal; the predicate still prunes VCS and target dirs, and entries are filtered in the consumer so work counters stay identical to before
 - `max_path_width` is cached on `AppState` and refreshed when the tree changes, rather than being rederived from every target on each frame
+- The interface adopts the terminal's own light/dark theme (ANSI colors, no forced black background) instead of a hardcoded dark look
+- The cursor row is highlighted with reverse video instead of an arrow glyph, so the cursor can no longer erase the selection color on a checked row
+- The delete chooser is a plain-language decision aid: "Preview only / Move to Trash / Delete permanently" with one-line consequences, clamped (non-wrapping) Up/Down navigation so `Up` from Preview can no longer land on the destructive option, and long selections truncate with an "… and N more" count instead of overflowing the dialog border
+- Header and states speak plainly: "X you can free · scanned in Ys", "measuring sizes n/m" while sizes stream in, "nothing found to clean" when the scan comes back empty, an explanatory scanning screen, a guided empty state, and a centered result panel after each sweep instead of a transient status-bar line
+- `q`, `Esc`, and `Ctrl-C` quit immediately: nothing destructive happens on close, so the quit confirmation dialog was removed
+- Sort dialog relabeled "Order by" → "Sort by"; all existing keybindings preserved (`Space`, `a`, `d`, `o`, `Enter`, `?` is the only newly added key)
+- Sort options display their number (`1`–`6`), and pressing that digit in the dialog jumps straight to the option — Enter still applies
+- Project groups in the tree are no longer separated by a blank spacer row; color and bold alone mark the group boundaries, keeping the list one row tighter per group the sort
+
+- The cursor position in the action bar now counts sweepable directories only; it used to include project headers, so the first directory in a two-project scan read "3/4" instead of "1/2"
 
 ### Performance
 - `pipeline/many-tiny` 34.76 ms → 9.43 ms (−72.9%, 3.7×), in two independent steps: `build_tree` 20.11 ms → 0.44 ms (−97.8%), then pass 1 across dua-core's pool 13.65 ms → 8.57 ms (−37%)
