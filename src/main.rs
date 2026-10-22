@@ -300,14 +300,9 @@ fn run_app(
                     state.phase = AppPhase::Quit;
                     break;
                 }
-                // One page = one screenful of list rows (frame minus the
-                // header and the action bar), re-read per key so a resized
-                // terminal pages correctly.
-                let page_rows = terminal
-                    .size()
-                    .map(|size| size.height as usize)
-                    .unwrap_or(24)
-                    .saturating_sub(2);
+                // One page = half a screenful of list rows, re-read per
+                // key so a resized terminal pages correctly.
+                let page_rows = page_rows(terminal.size().unwrap_or_default().height);
                 handle_key(code, page_rows, state)?;
             }
             Event::Mouse(mouse) => handle_mouse(mouse, state, &mouse_zones),
@@ -320,6 +315,13 @@ fn run_app(
     }
 
     Ok(())
+}
+
+/// Page size for `PageUp`/`PageDown`: half a screenful of list rows
+/// (frame minus the header and the action bar), `less`-style — the previous
+/// view stays half visible. Floors at one row so a tiny terminal still pages.
+fn page_rows(terminal_height: u16) -> usize {
+    ((terminal_height as usize).saturating_sub(2) / 2).max(1)
 }
 
 /// Route a key press to the handler of the active phase. Shared by
@@ -750,6 +752,17 @@ mod tests {
             state.current_entry(),
             Some(TreeEntry::TargetDir { .. })
         ));
+    }
+
+    #[test]
+    fn page_size_is_half_the_window_after_chrome() {
+        // 24-row terminal minus header and bar = 22 list rows → 11 per page.
+        assert_eq!(page_rows(24), 11);
+        // Odd rows round down.
+        assert_eq!(page_rows(25), 11);
+        // Tiny terminals still page, by at least one row.
+        assert_eq!(page_rows(2), 1);
+        assert_eq!(page_rows(0), 1);
     }
 
     #[test]

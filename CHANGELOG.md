@@ -23,7 +23,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Clickable action bar where every command is a visible button that still names its keyboard shortcut, plus full mouse support: click rows to toggle, click headers to move the cursor, mouse-wheel scrolling, and clickable dialog options and hints
 - `?` help overlay listing every key and button in plain language, grouped by purpose, also reachable from the bar's `[?] Help` button
 - Semantic theme module (`src/theme.rs`) with one color per meaning; the delete chooser describes each mode's consequence in plain words, and the interface now has a proper visual hierarchy (danger is red, in-progress is amber, metadata is muted)
-- `Home`/`End` jump the cursor to the first/last sweepable directory, and `PageUp`/`PageDown` page by one screenful of list rows (documented in the help overlay)
+- `Home`/`End` jump the cursor to the first/last sweepable directory, and `PageUp`/`PageDown` jump half a screen at a time (documented in the help overlay)
 
 ### Changed
 - CI clippy now lints all targets (`--all-targets`), covering benches
