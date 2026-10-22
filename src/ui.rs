@@ -271,11 +271,8 @@ fn render_browsing(state: &AppState, frame: &mut Frame, area: Rect, zones: &mut 
     let mut selected_row = 0;
 
     for (i, entry) in slice.iter().enumerate() {
-        // Blank row between project groups. Skipped on the first visible row:
-        // if the viewport starts on a header, a spacer above it wastes a line.
-        if i > 0 && matches!(entry, TreeEntry::ProjectHeader { .. }) {
-            items.push(ListItem::new(""));
-        }
+        // No spacer rows between project groups: groups separate by color
+        // and bold alone, keeping the list one row tighter per group.
 
         let item = match entry {
             TreeEntry::ProjectHeader { name, languages } => {
@@ -351,8 +348,9 @@ fn render_browsing(state: &AppState, frame: &mut Frame, area: Rect, zones: &mut 
             }
         };
 
-        // Track the cursor's row while building: spacers shift rows down, so the
-        // position can no longer be derived as list_index - scroll_offset.
+        // Track the cursor's row while building: one item per tree entry, so
+        // the position is list_index - scroll_offset — kept derived rather
+        // than assumed in case inter-item rows return (e.g. group spacing).
         if scroll_offset + i == state.list_index {
             selected_row = items.len();
         }
@@ -975,7 +973,7 @@ mod tests {
     }
 
     #[test]
-    fn tree_render_has_spacer_and_glyphs_and_cursor() {
+    fn tree_render_keeps_groups_adjacent_with_glyphs_and_cursor() {
         let mut state = AppState::new(PathBuf::from("/test"));
         state.build_tree(two_project_output());
         state.phase = AppPhase::Browsing;
@@ -988,14 +986,15 @@ mod tests {
             })
             .unwrap();
 
+        // Groups are adjacent: the row above the app-b header is the last
+        // child of app-a, not a blank spacer.
         let header_b_row = (0..20u16)
             .find(|&r| row(&terminal, r).contains(" app-b (js) "))
             .unwrap();
-        let spacer_row = row(&terminal, header_b_row - 1);
+        let row_above = row(&terminal, header_b_row - 1);
         assert!(
-            spacer_row.trim().is_empty(),
-            "expected blank spacer, got {:?}",
-            spacer_row
+            row_above.contains("app-a/node_modules"),
+            "expected the previous group's target above the header, got {row_above:?}"
         );
         let first_dir_row = (0..20u16)
             .find(|&r| row(&terminal, r).contains("app-a/node_modules"))
