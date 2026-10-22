@@ -17,7 +17,9 @@ use crossterm::{
 use ratatui::{Terminal, backend::CrosstermBackend, layout::Position};
 use rayon::prelude::*;
 
-use dirsweep::app::{AppPhase, AppState, DeletePreference, MouseAction, MouseZones, TreeEntry};
+use dirsweep::app::{
+    AppPhase, AppState, DeletePreference, MouseAction, MouseZones, OrderBy, TreeEntry,
+};
 
 enum SizeUpdate {
     Update {
@@ -298,7 +300,15 @@ fn run_app(
                     state.phase = AppPhase::Quit;
                     break;
                 }
-                handle_key(code, state)?;
+                // One page = one screenful of list rows (frame minus the
+                // header and the action bar), re-read per key so a resized
+                // terminal pages correctly.
+                let page_rows = terminal
+                    .size()
+                    .map(|size| size.height as usize)
+                    .unwrap_or(24)
+                    .saturating_sub(2);
+                handle_key(code, page_rows, state)?;
             }
             Event::Mouse(mouse) => handle_mouse(mouse, state, &mouse_zones),
             _ => {}
@@ -314,9 +324,9 @@ fn run_app(
 
 /// Route a key press to the handler of the active phase. Shared by
 /// `run_app`'s event loop so the dispatch is testable in isolation.
-fn handle_key(code: KeyCode, state: &mut AppState) -> io::Result<()> {
+fn handle_key(code: KeyCode, page_rows: usize, state: &mut AppState) -> io::Result<()> {
     match state.phase {
-        AppPhase::Browsing => handle_browsing_key(code, state)?,
+        AppPhase::Browsing => handle_browsing_key(code, page_rows, state)?,
         AppPhase::ConfirmDelete => handle_confirm_key(code, state)?,
         AppPhase::OrderDialog => handle_order_key(code, state)?,
         // Help is read-only: any key returns to browsing. `q` closes the
@@ -431,7 +441,7 @@ fn apply_sort(state: &mut AppState) {
     state.phase = AppPhase::Browsing;
 }
 
-fn handle_browsing_key(code: KeyCode, state: &mut AppState) -> io::Result<()> {
+fn handle_browsing_key(code: KeyCode, page_rows: usize, state: &mut AppState) -> io::Result<()> {
     // Any action dismisses the last sweep's result notice: the user has seen
     // it and is moving on.
     state.clear_notification();
@@ -451,6 +461,10 @@ fn handle_browsing_key(code: KeyCode, state: &mut AppState) -> io::Result<()> {
         KeyCode::Down | KeyCode::Char('j') => {
             state.move_down();
         }
+        KeyCode::Home => state.move_start(),
+        KeyCode::End => state.move_end(),
+        KeyCode::PageUp => state.page_up(page_rows),
+        KeyCode::PageDown => state.page_down(page_rows),
         KeyCode::Char(' ') => {
             state.toggle_selection();
         }
@@ -479,6 +493,14 @@ fn handle_order_key(code: KeyCode, state: &mut AppState) -> io::Result<()> {
         }
         KeyCode::Down | KeyCode::Char('j') => {
             state.order_cursor = state.order_cursor.step(1);
+        }
+        // 1–6 jump straight to an order (top to bottom, matching the labels).
+        // Select only: Enter — or the Apply hint — still commits.
+        KeyCode::Char(digit) if digit.is_ascii_digit() => {
+            let pick = digit.to_digit(10).unwrap_or(0) as usize;
+            if (1..=OrderBy::ALL.len()).contains(&pick) {
+                state.order_cursor = OrderBy::ALL[pick - 1];
+            }
         }
         KeyCode::Enter => apply_sort(state),
         KeyCode::Esc => {
@@ -647,22 +669,22 @@ mod tests {
     #[test]
     fn quits_immediately_without_confirmation() {
         let mut state = seeded_state();
-        handle_browsing_key(KeyCode::Char('q'), &mut state).unwrap();
+        handle_browsing_key(KeyCode::Char('q'), 24, &mut state).unwrap();
         assert_eq!(state.phase, AppPhase::Quit);
 
         let mut state = seeded_state();
-        handle_browsing_key(KeyCode::Esc, &mut state).unwrap();
+        handle_browsing_key(KeyCode::Esc, 24, &mut state).unwrap();
         assert_eq!(state.phase, AppPhase::Quit);
     }
 
     #[test]
     fn help_opens_with_question_mark_and_closes_on_any_key() {
         let mut state = seeded_state();
-        handle_key(KeyCode::Char('?'), &mut state).unwrap();
+        handle_key(KeyCode::Char('?'), 24, &mut state).unwrap();
         assert_eq!(state.phase, AppPhase::Help);
 
-        // `q` inside the help closes it; quitting takes a second press.
-        handle_key(KeyCode::Char('q'), &mut state).unwrap();
+        // `q` inside the help closes it; quitting needs a second press.
+        handle_key(KeyCode::Char('q'), 24, &mut state).unwrap();
         assert_eq!(state.phase, AppPhase::Browsing);
 
         // Mouse can open it too, and clicking the overlay closes it.
@@ -672,12 +694,93 @@ mod tests {
         assert_eq!(state.phase, AppPhase::Browsing);
     }
 
+    /// Two projects, each with one dir: [0] header, [1] target, [2] header,
+    /// [3] target — the layout that exposes header mistakes.
+    fn two_project_scan_output() -> ScanOutput {
+        let mk = |name: &str| ProjectInfo {
+            path: PathBuf::from(format!("/test/{name}")),
+            name: name.to_string(),
+            languages: vec!["js".to_string()],
+            children: vec![PathBuf::from(format!("/test/{name}/node_modules"))],
+        };
+
+        ScanOutput {
+            target_dirs: vec![
+                ScannedDir {
+                    path: PathBuf::from("/test/app-a/node_modules"),
+                    size: 1_000,
+                    last_modified: Utc::now(),
+                    error: None,
+                },
+                ScannedDir {
+                    path: PathBuf::from("/test/app-b/node_modules"),
+                    size: 2_000,
+                    last_modified: Utc::now(),
+                    error: None,
+                },
+            ],
+            projects: vec![mk("app-a"), mk("app-b")],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn starts_ends_and_pages_jump_to_targets() {
+        let mut state = AppState::new(PathBuf::from("/test"));
+        state.build_tree(two_project_scan_output());
+        state.phase = AppPhase::Browsing;
+
+        state.list_index = 3;
+        handle_browsing_key(KeyCode::End, 40, &mut state).unwrap();
+        assert_eq!(state.list_index, 3, "end has nothing further to reach");
+        handle_browsing_key(KeyCode::Home, 40, &mut state).unwrap();
+        assert_eq!(state.list_index, 1, "home lands on the first target");
+
+        state.list_index = 1;
+        handle_browsing_key(KeyCode::PageDown, 40, &mut state).unwrap();
+        assert_eq!(state.list_index, 3, "page down reaches the last target");
+        handle_browsing_key(KeyCode::PageUp, 40, &mut state).unwrap();
+        assert_eq!(state.list_index, 1, "page up returns to the first target");
+
+        // Steps clamp at the extreme targets and never strand on a header.
+        state.list_index = 3;
+        handle_browsing_key(KeyCode::PageDown, 1, &mut state).unwrap();
+        assert_eq!(state.list_index, 3, "page down at the bottom stays put");
+        assert!(matches!(
+            state.current_entry(),
+            Some(TreeEntry::TargetDir { .. })
+        ));
+    }
+
+    #[test]
+    fn sort_dialog_digits_pick_their_order() {
+        let mut state = seeded_state();
+        state.phase = AppPhase::OrderDialog;
+
+        handle_order_key(KeyCode::Char('3'), &mut state).unwrap();
+        assert_eq!(state.order_cursor, OrderBy::DateAsc, "3 picks DateAsc");
+
+        handle_order_key(KeyCode::Char('6'), &mut state).unwrap();
+        assert_eq!(state.order_cursor, OrderBy::SizeDesc);
+
+        // 6 is the last choice; 0 and 7 pick nothing.
+        handle_order_key(KeyCode::Char('0'), &mut state).unwrap();
+        assert_eq!(state.order_cursor, OrderBy::SizeDesc);
+        handle_order_key(KeyCode::Char('7'), &mut state).unwrap();
+        assert_eq!(state.order_cursor, OrderBy::SizeDesc);
+
+        // Enter still commits.
+        handle_order_key(KeyCode::Enter, &mut state).unwrap();
+        assert_eq!(state.phase, AppPhase::Browsing);
+        assert_eq!(state.ordered_by, OrderBy::SizeDesc);
+    }
+
     #[test]
     fn any_browsing_action_dismisses_the_result_notice() {
         let mut state = seeded_state();
         state.delete_result_summary = Some("Done! 1 deleted".to_string());
 
-        handle_browsing_key(KeyCode::Up, &mut state).unwrap();
+        handle_browsing_key(KeyCode::Up, 24, &mut state).unwrap();
         assert_eq!(state.delete_result_summary, None);
     }
 }

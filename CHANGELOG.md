@@ -23,6 +23,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Clickable action bar where every command is a visible button that still names its keyboard shortcut, plus full mouse support: click rows to toggle, click headers to move the cursor, mouse-wheel scrolling, and clickable dialog options and hints
 - `?` help overlay listing every key and button in plain language, grouped by purpose, also reachable from the bar's `[?] Help` button
 - Semantic theme module (`src/theme.rs`) with one color per meaning; the delete chooser describes each mode's consequence in plain words, and the interface now has a proper visual hierarchy (danger is red, in-progress is amber, metadata is muted)
+- `Home`/`End` jump the cursor to the first/last sweepable directory, and `PageUp`/`PageDown` page by one screenful of list rows (documented in the help overlay)
 
 ### Changed
 - CI clippy now lints all targets (`--all-targets`), covering benches
@@ -37,6 +38,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - Header and states speak plainly: "X you can free · scanned in Ys", "measuring sizes n/m" while sizes stream in, "nothing found to clean" when the scan comes back empty, an explanatory scanning screen, a guided empty state, and a centered result panel after each sweep instead of a transient status-bar line
 - `q`, `Esc`, and `Ctrl-C` quit immediately: nothing destructive happens on close, so the quit confirmation dialog was removed
 - Sort dialog relabeled "Order by" → "Sort by"; all existing keybindings preserved (`Space`, `a`, `d`, `o`, `Enter`, `?` is the only newly added key)
+- Sort options display their number (`1`–`6`), and pressing that digit in the dialog jumps straight to the option — Enter still applies the sort
 
 - The cursor position in the action bar now counts sweepable directories only; it used to include project headers, so the first directory in a two-project scan read "3/4" instead of "1/2"
 

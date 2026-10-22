@@ -137,6 +137,8 @@ fn render_help_dialog(frame: &mut Frame, area: Rect, zones: &mut MouseZones) {
         Line::from(""),
         group("Navigate"),
         row("[\u{2191}/\u{2193}]", "Move the cursor"),
+        row("[Home/End]", "First or last directory"),
+        row("[PgUp/PgDn]", "Jump a page at a time"),
         row("[Space]", "Toggle the selected row"),
         group("Select"),
         row("[a]", "Select everything"),
@@ -808,7 +810,7 @@ fn render_order_dialog(state: &AppState, frame: &mut Frame, area: Rect, zones: &
     let variants = OrderBy::ALL;
 
     // title + blank + one row per variant + blank + hint, plus borders.
-    let content_height = 3 + variants.len();
+    let content_height = 4 + variants.len();
     let dialog_width = 40.min(area.width.saturating_sub(4));
     let dialog_height = ((content_height as u16) + 2).min(area.height.saturating_sub(4).max(3));
     let x = (area.width - dialog_width) / 2;
@@ -828,7 +830,7 @@ fn render_order_dialog(state: &AppState, frame: &mut Frame, area: Rect, zones: &
         Line::from(""),
     ];
 
-    for variant in &variants {
+    for (i, variant) in variants.iter().enumerate() {
         let is_active = *variant == state.order_cursor;
         let bullet = if is_active { "\u{25CF}" } else { "\u{25CB}" };
         let fg = if is_active {
@@ -839,7 +841,7 @@ fn render_order_dialog(state: &AppState, frame: &mut Frame, area: Rect, zones: &
         lines.push(Line::from(vec![
             Span::raw("  "),
             Span::styled(
-                format!("{} {}", bullet, variant.label()),
+                format!("{} {}. {}", bullet, i + 1, variant.label()),
                 Style::default().fg(fg).add_modifier(if is_active {
                     Modifier::BOLD
                 } else {
@@ -851,10 +853,8 @@ fn render_order_dialog(state: &AppState, frame: &mut Frame, area: Rect, zones: &
 
     lines.push(Line::from(""));
     let hint_index = lines.len();
-    lines.push(Line::from(Span::styled(
-        " [\u{2191}/\u{2193}] choose  [Enter] apply  [Esc] cancel",
-        theme::muted(),
-    )));
+    let hint = " [1\u{2013}6] pick  [\u{2191}/\u{2193}] choose  [Enter] apply  [Esc] cancel";
+    lines.push(Line::from(Span::styled(hint, theme::muted())));
 
     for (i, variant) in variants.iter().enumerate() {
         zones.push((
@@ -867,7 +867,10 @@ fn render_order_dialog(state: &AppState, frame: &mut Frame, area: Rect, zones: &
             MouseAction::SortBy(*variant),
         ));
     }
-    let apply_x = " [\u{2191}/\u{2193}] choose  ".len() as u16;
+    // Zone offsets come straight from the hint text so they can never drift
+    // out of sync with what is rendered.
+    let apply_x = hint.find("[Enter]").unwrap_or(0) as u16;
+    let cancel_x = hint.find("[Esc]").unwrap_or(0) as u16;
     for (rect, action) in [
         (
             Rect::new(
@@ -880,7 +883,7 @@ fn render_order_dialog(state: &AppState, frame: &mut Frame, area: Rect, zones: &
         ),
         (
             Rect::new(
-                dialog_area.x + apply_x + "[Enter] apply".len() as u16 + 2,
+                dialog_area.x + cancel_x,
                 dialog_area.y + 1 + hint_index as u16,
                 "[Esc] cancel".len() as u16,
                 1,
@@ -1208,6 +1211,14 @@ mod tests {
         let text: String = (0..20u16).map(|r| row(&terminal, r)).collect();
         assert!(text.contains("Sort by"), "{text}");
         assert!(text.contains("Largest first"), "{text}");
+        // Every option shows its number so the 1–6 keys match the labels.
+        assert!(text.contains("1. Name (A \u{2192} Z)"), "{text}");
+        assert!(text.contains("2. Name (Z \u{2192} A)"), "{text}");
+        assert!(text.contains("3. Oldest first"), "{text}");
+        assert!(text.contains("4. Newest first"), "{text}");
+        assert!(text.contains("5. Smallest first"), "{text}");
+        assert!(text.contains("6. Largest first"), "{text}");
+        assert!(text.contains("[1\u{2013}6] pick"), "{text}");
 
         for order in OrderBy::ALL {
             assert!(
@@ -1225,7 +1236,8 @@ mod tests {
         state.build_tree(two_project_output());
         state.phase = AppPhase::Help;
 
-        let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+        // Standard 24-row terminal: fits the full help without clipping.
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         let mut zones = MouseZones::new();
         terminal
             .draw(|f| {
@@ -1233,10 +1245,12 @@ mod tests {
             })
             .unwrap();
 
-        let text: String = (0..20u16).map(|r| row(&terminal, r)).collect();
+        let text: String = (0..24u16).map(|r| row(&terminal, r)).collect();
         assert!(text.contains("Help"), "{text}");
         assert!(text.contains("Navigate"), "{text}");
         assert!(text.contains("Move the cursor"), "{text}");
+        assert!(text.contains("First or last directory"), "{text}");
+        assert!(text.contains("Jump a page at a time"), "{text}");
         assert!(text.contains("Toggle the selected row"), "{text}");
         assert!(text.contains("Delete what you selected"), "{text}");
         assert!(text.contains("Sort the list"), "{text}");

@@ -419,6 +419,54 @@ impl AppState {
         }
     }
 
+    /// Jump to the first sweepable target (never a project header).
+    pub fn move_start(&mut self) {
+        if let Some(i) = self
+            .tree
+            .iter()
+            .position(|e| matches!(e, TreeEntry::TargetDir { .. }))
+        {
+            self.list_index = i;
+        }
+    }
+
+    /// Jump to the last sweepable target (never a project header).
+    pub fn move_end(&mut self) {
+        if let Some(i) = self
+            .tree
+            .iter()
+            .rposition(|e| matches!(e, TreeEntry::TargetDir { .. }))
+        {
+            self.list_index = i;
+        }
+    }
+
+    /// Page the cursor up by `rows` rows.
+    ///
+    /// Implemented as repeated single steps — which already skip headers and
+    /// clamp at the first target — with an early exit once a step moves
+    /// nothing, so no geometry of the tree is duplicated here.
+    pub fn page_up(&mut self, rows: usize) {
+        for _ in 0..rows {
+            let before = self.list_index;
+            self.move_up();
+            if self.list_index == before {
+                break;
+            }
+        }
+    }
+
+    /// Page the cursor down by `rows` rows, clamped at the last target.
+    pub fn page_down(&mut self, rows: usize) {
+        for _ in 0..rows {
+            let before = self.list_index;
+            self.move_down();
+            if self.list_index == before {
+                break;
+            }
+        }
+    }
+
     pub fn remove_deleted_from_tree(&mut self) {
         let deleted = std::mem::take(&mut self.selected);
         let old_tree = std::mem::take(&mut self.tree);
@@ -1089,6 +1137,43 @@ mod tests {
             projects: vec![mk("app-a"), mk("app-b")],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn test_start_end_and_page_land_on_targets() {
+        // Tree: [0] header, [1] target, [2] header, [3] target.
+        let mut state = AppState::new(PathBuf::from("/test"));
+        state.build_tree(two_project_scan_output());
+
+        state.jump_to(3);
+        state.move_start();
+        assert_eq!(state.list_index, 1, "start lands on the first target");
+
+        state.jump_to(1);
+        state.move_end();
+        assert_eq!(state.list_index, 3, "end lands on the last target");
+
+        // Paging skips headers and clamps at both ends.
+        state.list_index = 1;
+        state.page_down(10);
+        assert_eq!(state.list_index, 3, "page down clamps at the last target");
+
+        state.page_down(10);
+        assert_eq!(state.list_index, 3, "further page downs stay put");
+
+        state.page_up(10);
+        assert_eq!(state.list_index, 1, "page up clamps at the first target");
+
+        state.page_up(10);
+        assert_eq!(state.list_index, 1, "further page ups stay put");
+
+        // Pages never strand the cursor on a header.
+        state.list_index = 3;
+        state.page_up(1);
+        assert!(matches!(
+            state.current_entry(),
+            Some(TreeEntry::TargetDir { .. })
+        ));
     }
 
     #[test]
