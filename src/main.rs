@@ -1,5 +1,5 @@
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -18,7 +18,8 @@ use ratatui::{Terminal, backend::CrosstermBackend, layout::Position};
 use rayon::prelude::*;
 
 use dirsweep::app::{
-    AppPhase, AppState, DeletePreference, MouseAction, MouseZones, OrderBy, TreeEntry,
+    AppPhase, AppState, DeletePreference, DeletedTarget, MouseAction, MouseZones, OrderBy,
+    TreeEntry,
 };
 
 enum SizeUpdate {
@@ -28,6 +29,16 @@ enum SizeUpdate {
         last_modified: DateTime<Utc>,
         error: Option<String>,
     },
+    Done,
+}
+
+/// One result from the background delete worker, streamed per directory so
+/// the interface can show live progress instead of freezing on the UI
+/// thread.
+enum DeleteUpdate {
+    /// One path finished; `ok` records whether the removal succeeded.
+    Progress { path: PathBuf, ok: bool },
+    /// All armed paths handled.
     Done,
 }
 
@@ -137,6 +148,10 @@ fn run_app(
     state.phase = AppPhase::Browsing;
 
     let (tx, rx) = mpsc::channel::<SizeUpdate>();
+    let mut delete_rx: Option<mpsc::Receiver<DeleteUpdate>> = None;
+    // A Ctrl-C pressed during a sweep defers itself; the app exits once the
+    // sweep finalizes instead of killing the worker mid-delete.
+    let mut pending_quit = false;
 
     let target_paths: Vec<PathBuf> = state
         .tree
@@ -210,77 +225,48 @@ fn run_app(
             }
         }
 
+        // Live deletion: drain the worker's results without blocking, then
+        // draw. The worker removes one directory at a time, so the dialog
+        // animates at the event loop's cadence instead of freezing per call.
+        if state.phase == AppPhase::Deleting {
+            match delete_rx.as_mut() {
+                Some(rx) => loop {
+                    match rx.try_recv() {
+                        Ok(update) => {
+                            apply_delete_update(state, update);
+                            if state.phase != AppPhase::Deleting {
+                                // Done already consumed; drop the finished
+                                // receiver so the next run spawns fresh.
+                                delete_rx = None;
+                                break;
+                            }
+                        }
+                        Err(mpsc::TryRecvError::Empty) => break,
+                        // The worker always sends Done before dropping its
+                        // sender; a disconnect before Done is a panicked
+                        // worker — finalize the sweep as interrupted rather
+                        // than wedge the interface in a locked phase.
+                        Err(mpsc::TryRecvError::Disconnected) => {
+                            delete_rx = None;
+                            recover_interrupted_sweep(state);
+                            break;
+                        }
+                    }
+                },
+                None => delete_rx = Some(spawn_delete_worker(state)),
+            }
+        }
+
+        // A deferred Ctrl-C: the sweep has finalized, so exit now.
+        if pending_quit && state.phase != AppPhase::Deleting {
+            state.phase = AppPhase::Quit;
+            break;
+        }
+
         terminal.draw(|f| mouse_zones = dirsweep::ui::render(state, f))?;
 
         if state.phase == AppPhase::Deleting && state.deleting_paths.is_empty() {
             state.phase = AppPhase::Browsing;
-            continue;
-        }
-
-        if state.phase == AppPhase::Deleting && state.deleting_index < state.deleting_paths.len() {
-            let path = state.deleting_paths[state.deleting_index].clone();
-
-            let ok = match state.delete_preference {
-                DeletePreference::Trash => trash::delete(&path).is_ok(),
-                DeletePreference::Permanent => std::fs::remove_dir_all(&path).is_ok(),
-                DeletePreference::DryRun => {
-                    std::thread::sleep(Duration::from_millis(500));
-                    true
-                }
-            };
-
-            state.deleting_index += 1;
-
-            if !ok {
-                state.deleting_failed.push(path);
-            }
-
-            if state.deleting_index == state.deleting_paths.len() {
-                let count = state.deleting_paths.len() - state.deleting_failed.len();
-                let reclaimed_size: u64 = state
-                    .selected
-                    .iter()
-                    .filter(|p| !state.deleting_failed.contains(p))
-                    .filter_map(|p| {
-                        state
-                            .target_index
-                            .get(p)
-                            .and_then(|&idx| state.tree.get(idx))
-                            .and_then(|entry| match entry {
-                                TreeEntry::TargetDir { size, .. } => Some(*size),
-                                _ => None,
-                            })
-                    })
-                    .sum();
-                let size_str = humansize::format_size(reclaimed_size, humansize::BINARY);
-
-                for failed in &state.deleting_failed {
-                    state.selected.remove(failed);
-                }
-
-                state.accumulate_deletion(count, reclaimed_size);
-                state.delete_result_summary = Some(if state.deleting_failed.is_empty() {
-                    format!(
-                        "Done! {} directory(ies) deleted, {} reclaimed",
-                        state.deleting_paths.len(),
-                        size_str
-                    )
-                } else {
-                    format!(
-                        "Done! {} deleted, {} failed, {} reclaimed",
-                        count,
-                        state.deleting_failed.len(),
-                        size_str
-                    )
-                });
-
-                state.remove_deleted_from_tree();
-                state.deleting_paths.clear();
-                state.deleting_failed.clear();
-                state.phase = AppPhase::Browsing;
-            }
-
-            continue;
         }
 
         let timeout = Duration::from_millis(50);
@@ -297,8 +283,11 @@ fn run_app(
                 ..
             }) => {
                 if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
-                    state.phase = AppPhase::Quit;
-                    break;
+                    if handle_ctrl_c(state) {
+                        state.phase = AppPhase::Quit;
+                        break;
+                    }
+                    pending_quit = true;
                 }
                 // One page = half a screenful of list rows, re-read per
                 // key so a resized terminal pages correctly.
@@ -334,9 +323,37 @@ fn handle_key(code: KeyCode, page_rows: usize, state: &mut AppState) -> io::Resu
         // Help is read-only: any key returns to browsing. `q` closes the
         // help first; quitting needs a second press.
         AppPhase::Help => state.phase = AppPhase::Browsing,
+        // A sweep runs while the worker mutates the tree underneath, but
+        // watching is not being locked: cursor movement stays live. Only
+        // actions that could fight the sweep — selection changes, dialogs,
+        // and quitting — stay inert until it finishes.
+        AppPhase::Deleting => match code {
+            KeyCode::Up | KeyCode::Char('k') => state.move_up(),
+            KeyCode::Down | KeyCode::Char('j') => state.move_down(),
+            KeyCode::Home => state.move_start(),
+            KeyCode::End => state.move_end(),
+            KeyCode::PageUp => state.page_up(page_rows),
+            KeyCode::PageDown => state.page_down(page_rows),
+            _ => {}
+        },
         _ => {}
     }
     Ok(())
+}
+
+/// Route a Ctrl-C press. Mid-sweep it cannot exit — that would kill the
+/// worker mid-delete and leave a half-swept tree — so it defers instead and
+/// the sweep finishes before the app quits. Returns whether the app should
+/// exit immediately.
+fn handle_ctrl_c(state: &mut AppState) -> bool {
+    if state.phase == AppPhase::Deleting {
+        state
+            .errors
+            .push("Ctrl-C pressed — the sweep will finish before exit".to_string());
+        false
+    } else {
+        true
+    }
 }
 
 /// Hit-test a mouse event against the newest frame's clickable regions.
@@ -367,6 +384,12 @@ fn handle_mouse(mouse: MouseEvent, state: &mut AppState, zones: &MouseZones) {
 /// about state (e.g. `Delete` is as inert as `Enter` when nothing is
 /// selected).
 fn apply_mouse_action(action: MouseAction, state: &mut AppState) {
+    // A sweep runs while the worker mutates the tree underneath: the whole
+    // interface is locked, mouse included, until it finishes. (The renderer
+    // also offers no clickable zones — this is the second safety net.)
+    if state.phase == AppPhase::Deleting {
+        return;
+    }
     match action {
         MouseAction::Toggle => state.toggle_selection(),
         MouseAction::MoveTo(i) => state.jump_to(i),
@@ -427,12 +450,157 @@ fn apply_mouse_action(action: MouseAction, state: &mut AppState) {
 }
 
 /// Arm the deletion pipeline. Shared by the Enter key and the dialog's
-/// confirm button so the two entry points can never drift.
+/// confirm button so the two entry points can never drift. Every mode takes
+/// the armed rows out of the list immediately — a preview is a dress
+/// rehearsal that plays out the sweep and puts everything back afterwards.
+/// The work itself starts on the next event-loop pass, which spawns the
+/// worker and owns its channel.
 fn begin_delete(state: &mut AppState) {
     state.deleting_paths = state.selected.iter().cloned().collect();
     state.deleting_index = 0;
     state.deleting_failed = Vec::new();
+    state.deleting_reclaimed = 0;
+    state.deleting_stash.clear();
     state.phase = AppPhase::Deleting;
+    state.arm_sweep();
+}
+
+/// Start the background delete worker. One thread removes the armed paths
+/// sequentially — the safest option on every storage type — and streams a
+/// result per directory so the UI can show live progress. Returns the
+/// channel the event loop drains.
+fn spawn_delete_worker(state: &AppState) -> mpsc::Receiver<DeleteUpdate> {
+    let preference = state.delete_preference;
+    let paths = state.deleting_paths.clone();
+    let (tx, rx) = mpsc::channel();
+
+    thread::spawn(move || {
+        for path in paths {
+            let ok = match preference {
+                DeletePreference::Trash => trash::delete(&path).is_ok(),
+                DeletePreference::Permanent => std::fs::remove_dir_all(&path).is_ok(),
+                DeletePreference::DryRun => {
+                    thread::sleep(Duration::from_millis(500));
+                    true
+                }
+            };
+            // A failed send means the interface is already gone; stop
+            // instead of deleting further from a zombie progress stream.
+            if tx.send(DeleteUpdate::Progress { path, ok }).is_err() {
+                break;
+            }
+        }
+        let _ = tx.send(DeleteUpdate::Done);
+    });
+
+    rx
+}
+
+/// Apply one worker result to the shared state. Kept separate from the
+/// event loop so the reclamation accounting and the completion notice are
+/// testable without threads.
+fn apply_delete_update(state: &mut AppState, update: DeleteUpdate) {
+    match update {
+        DeleteUpdate::Progress { path, ok } => {
+            state.deleting_index += 1;
+            if !ok {
+                // The stashed row waits: failed deletes reappear checked at
+                // the end of the sweep, ready for a one-Enter retry.
+                state.deleting_failed.push(path);
+            } else if state.delete_preference == DeletePreference::DryRun {
+                // A preview changes nothing: the stash stays for the full
+                // restore at the end, so the size is read without popping.
+                state.deleting_reclaimed += peek_stashed_size(state, &path);
+            } else {
+                state.deleting_reclaimed += take_stashed_size(state, &path);
+            }
+        }
+        DeleteUpdate::Done => finish_delete(state, false),
+    }
+}
+
+/// Fail-safe for a panicked deletion worker: the channel is gone, so every
+/// row still in the stash has unknown fate. Restore them all checked and
+/// report an interrupted sweep instead of wedging the interface in a locked
+/// phase it can never leave.
+fn recover_interrupted_sweep(state: &mut AppState) {
+    let unreported = state.deleting_stash.keys().cloned().collect::<Vec<_>>();
+    for path in unreported {
+        state.deleting_failed.push(path);
+    }
+    finish_delete(state, true);
+}
+
+/// Read a stashed row's size without removing it — a preview must keep the
+/// whole stash for the end-of-sweep restore.
+fn peek_stashed_size(state: &AppState, path: &Path) -> u64 {
+    match state.deleting_stash.get(path) {
+        Some(DeletedTarget {
+            entry: TreeEntry::TargetDir { size, .. },
+            ..
+        }) => *size,
+        _ => 0,
+    }
+}
+
+/// Pop a stashed row and report its size for the sweep's reclaim total.
+fn take_stashed_size(state: &mut AppState, path: &Path) -> u64 {
+    match state.deleting_stash.remove(path) {
+        Some(DeletedTarget {
+            entry: TreeEntry::TargetDir { size, .. },
+            ..
+        }) => size,
+        _ => 0,
+    }
+}
+
+/// Summarize a completed sweep and return to browsing. There is no panel:
+/// the notice takes over the header's stats slot until dismissed, and the
+/// shrinking "you can free" total has been the running confirmation all
+/// along. Stashed rows go back now — every failure in a real sweep (checked,
+/// one Enter from a retry), and everything, checked, when the sweep was a
+/// preview.
+fn finish_delete(state: &mut AppState, interrupted: bool) {
+    let failed = std::mem::take(&mut state.deleting_failed);
+    let count = state.deleting_paths.len() - failed.len();
+    let size_str = humansize::format_size(state.deleting_reclaimed, humansize::BINARY);
+
+    let stashed = std::mem::take(&mut state.deleting_stash);
+    for (path, target) in stashed {
+        if state.delete_preference == DeletePreference::DryRun || failed.contains(&path) {
+            state.reinsert_target(target);
+        }
+    }
+    // Restored rows must land where the active sort says, not tacked onto
+    // the end of their group.
+    state.order_tree(state.ordered_by);
+    // A preview deleted nothing: lifetime totals stay untouched.
+    if state.delete_preference != DeletePreference::DryRun {
+        state.accumulate_deletion(count, state.deleting_reclaimed);
+    }
+
+    let outro = if state.delete_preference == DeletePreference::DryRun {
+        format!("would sweep {} \u{b7} {} reclaimable", count, size_str)
+    } else {
+        format!("swept {} \u{b7} {} reclaimed", count, size_str)
+    };
+    state.delete_result_summary = Some(if interrupted {
+        // The worker died mid-sweep: unknown-fate rows are back in the list
+        // (checked), and the count only covers what was confirmed deleted.
+        format!("sweep interrupted · {} restored", failed.len())
+    } else if failed.is_empty() {
+        outro
+    } else {
+        format!(
+            "{} \u{b7} {} failed",
+            outro, // "swept 2 · 1.2 GiB reclaimed · 1 failed"
+            failed.len()
+        )
+    });
+
+    state.deleting_paths.clear();
+    state.deleting_reclaimed = 0;
+    state.phase = AppPhase::Browsing;
 }
 
 /// Commit the sort picked in the sort dialog. Shared by Enter and the
@@ -752,6 +920,300 @@ mod tests {
             state.current_entry(),
             Some(TreeEntry::TargetDir { .. })
         ));
+    }
+
+    #[test]
+    fn arming_a_sweep_vanishes_the_rows_and_the_notice_replays_the_result() {
+        let mut state = seeded_state();
+        state.select_all();
+        let path = PathBuf::from("/test/app/node_modules");
+        begin_delete(&mut state);
+
+        // Committed removal: whole group gone, row stashed for failures,
+        // selection drained, and the total matches what's on disk now.
+        assert_eq!(state.phase, AppPhase::Deleting);
+        assert_eq!(state.tree.len(), 0);
+        assert_eq!(state.selection_count(), 0);
+        assert_eq!(state.total_reclaimable, 0);
+        assert_eq!(state.deleting_stash.len(), 1);
+        assert_eq!(state.deleting_paths, vec![path.clone()]);
+
+        apply_delete_update(
+            &mut state,
+            DeleteUpdate::Progress {
+                path: path.clone(),
+                ok: true,
+            },
+        );
+        assert_eq!(state.deleting_index, 1);
+        assert_eq!(state.deleting_reclaimed, 1_000, "size came from the stash");
+        assert_eq!(state.phase, AppPhase::Deleting, "still sweeping");
+
+        apply_delete_update(&mut state, DeleteUpdate::Done);
+        assert_eq!(state.phase, AppPhase::Browsing);
+        assert!(state.deleting_paths.is_empty());
+        assert!(state.deleting_stash.is_empty());
+        assert_eq!(state.total_deleted_count, 1);
+        assert_eq!(state.total_deleted_size, 1_000);
+        assert_eq!(
+            state.delete_result_summary.as_deref(),
+            Some("swept 1 \u{b7} 1000 B reclaimed")
+        );
+    }
+
+    #[test]
+    fn failed_deletes_reappear_checked_when_the_sweep_ends() {
+        let mut state = seeded_state();
+        state.select_all();
+        let path = PathBuf::from("/test/app/node_modules");
+        begin_delete(&mut state);
+        assert_eq!(state.tree.len(), 0, "armed rows vanish immediately");
+
+        apply_delete_update(&mut state, DeleteUpdate::Progress { path, ok: false });
+        apply_delete_update(&mut state, DeleteUpdate::Done);
+
+        assert_eq!(state.phase, AppPhase::Browsing);
+        let summary = state.delete_result_summary.as_ref().unwrap();
+        assert!(
+            summary.contains("swept 0") && summary.contains("1 failed"),
+            "{summary}"
+        );
+        // The group (header + target) is rebuilt with the checkbox on, so a
+        // retry is literally one Enter away.
+        assert_eq!(state.tree.len(), 2);
+        assert_eq!(state.selection_count(), 1);
+        assert_eq!(state.total_reclaimable, 1_000);
+    }
+
+    #[test]
+    fn restored_rows_land_in_the_active_sort_order() {
+        // One project, three targets sized so their build order (1k, 3k, 2k)
+        // differs from a size-descending order (3k, 2k, 1k).
+        let mut state = AppState::new(PathBuf::from("/test"));
+        state.build_tree(ScanOutput {
+            target_dirs: vec![
+                ScannedDir {
+                    path: PathBuf::from("/test/p/node-small"),
+                    size: 1_000,
+                    last_modified: Utc::now(),
+                    error: None,
+                },
+                ScannedDir {
+                    path: PathBuf::from("/test/p/node-big"),
+                    size: 3_000,
+                    last_modified: Utc::now(),
+                    error: None,
+                },
+                ScannedDir {
+                    path: PathBuf::from("/test/p/node-mid"),
+                    size: 2_000,
+                    last_modified: Utc::now(),
+                    error: None,
+                },
+            ],
+            projects: vec![ProjectInfo {
+                path: PathBuf::from("/test/p"),
+                name: "p".to_string(),
+                languages: vec!["js".to_string()],
+                children: vec![
+                    PathBuf::from("/test/p/node-small"),
+                    PathBuf::from("/test/p/node-big"),
+                    PathBuf::from("/test/p/node-mid"),
+                ],
+            }],
+            ..Default::default()
+        });
+        state.order_tree(OrderBy::SizeDesc);
+
+        state.select_all();
+        begin_delete(&mut state);
+        // Two failures come back; without the re-sort they could land in any
+        // order at the group's end (the stash is a hash map).
+        apply_delete_update(
+            &mut state,
+            DeleteUpdate::Progress {
+                path: PathBuf::from("/test/p/node-mid"),
+                ok: false,
+            },
+        );
+        apply_delete_update(
+            &mut state,
+            DeleteUpdate::Progress {
+                path: PathBuf::from("/test/p/node-small"),
+                ok: false,
+            },
+        );
+        apply_delete_update(
+            &mut state,
+            DeleteUpdate::Progress {
+                path: PathBuf::from("/test/p/node-big"),
+                ok: true,
+            },
+        );
+        apply_delete_update(&mut state, DeleteUpdate::Done);
+
+        assert_eq!(state.phase, AppPhase::Browsing);
+        let sizes: Vec<u64> = state
+            .tree
+            .iter()
+            .filter_map(|e| match e {
+                TreeEntry::TargetDir { size, .. } => Some(*size),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sizes, vec![2_000, 1_000], "size-desc across restored rows");
+        assert_eq!(state.ordered_by, OrderBy::SizeDesc, "sort was not changed");
+        let summary = state.delete_result_summary.as_ref().unwrap();
+        assert!(
+            summary.contains("2 failed") && summary.contains("swept 1 · 2.93 KiB"),
+            "{summary}"
+        );
+    }
+
+    #[test]
+    fn a_panicked_worker_finalizes_as_an_interrupted_sweep() {
+        let mut state = seeded_state();
+        state.select_all();
+        begin_delete(&mut state);
+        assert_eq!(state.tree.len(), 0);
+
+        // Simulates the channel dying mid-sweep: nothing was reported ok, so
+        // every stashed row has unknown fate and must come back.
+        recover_interrupted_sweep(&mut state);
+
+        assert_eq!(state.phase, AppPhase::Browsing, "never stays locked");
+        assert!(state.deleting_paths.is_empty());
+        assert!(state.deleting_failed.is_empty());
+        assert!(state.deleting_stash.is_empty());
+        assert_eq!(state.tree.len(), 2);
+        assert_eq!(state.selection_count(), 1, "returns checked for a retry");
+        assert_eq!(state.total_reclaimable, 1_000);
+        assert_eq!(state.total_deleted_count, 0, "nothing confirmed deleted");
+        let summary = state.delete_result_summary.as_ref().unwrap();
+        assert!(
+            summary.contains("interrupted") && summary.contains("1 restored"),
+            "{summary}"
+        );
+    }
+
+    #[test]
+    fn ctrl_c_quits_now_except_mid_sweep() {
+        let mut state = seeded_state();
+        assert!(handle_ctrl_c(&mut state), "browsing quits immediately");
+
+        // A sweep in flight: defer with a plain-language explanation.
+        state.select_all();
+        begin_delete(&mut state);
+        assert!(!handle_ctrl_c(&mut state));
+        assert_eq!(state.phase, AppPhase::Deleting, "no exit mid-sweep");
+        assert_eq!(state.errors.len(), 1);
+        assert!(
+            state.errors[0].contains("Ctrl-C") && state.errors[0].contains("sweep"),
+            "{}",
+            state.errors[0]
+        );
+    }
+
+    #[test]
+    fn a_preview_rehearses_then_restores_everything() {
+        let mut state = seeded_state();
+        state.select_all();
+        state.delete_preference = DeletePreference::DryRun;
+        let path = PathBuf::from("/test/app/node_modules");
+        begin_delete(&mut state);
+
+        // A preview plays out the sweep: rows leave exactly as they would
+        // in a real sweep.
+        assert_eq!(state.tree.len(), 0);
+        assert_eq!(state.deleting_stash.len(), 1);
+
+        apply_delete_update(&mut state, DeleteUpdate::Progress { path, ok: true });
+        assert_eq!(state.deleting_reclaimed, 1_000);
+        assert_eq!(state.tree.len(), 0, "still rehearsing");
+
+        apply_delete_update(&mut state, DeleteUpdate::Done);
+        assert_eq!(
+            state.delete_result_summary.as_deref(),
+            Some("would sweep 1 \u{b7} 1000 B reclaimable")
+        );
+        // ...and the world is put back unchanged: every row returns with
+        // its checkmark, nothing was deleted.
+        assert_eq!(state.tree.len(), 2);
+        assert_eq!(state.selection_count(), 1);
+        assert_eq!(state.total_reclaimable, 1_000);
+        assert!(state.deleting_stash.is_empty());
+        assert_eq!(state.total_deleted_count, 0, "preview deleted nothing");
+        assert_eq!(state.total_deleted_size, 0);
+    }
+
+    #[test]
+    fn sweeps_allow_cursor_navigation_but_nothing_else() {
+        let mut state = AppState::new(PathBuf::from("/test"));
+        state.build_tree(two_project_scan_output());
+        // A sweep of app-b's dir is in flight; app-a's rows remain.
+        state.list_index = 3;
+        state.toggle_selection();
+        begin_delete(&mut state);
+        assert_eq!(state.tree.len(), 2, "only the armed row left the list");
+        assert_eq!(state.list_index, 1, "clamped back onto a target");
+
+        // Cursor movement stays live while the worker works.
+        handle_key(KeyCode::Down, 24, &mut state).unwrap();
+        assert_eq!(state.list_index, 1, "nothing below the last target");
+        handle_key(KeyCode::Up, 24, &mut state).unwrap();
+        assert_eq!(state.list_index, 1, "clamped at the first target");
+        handle_key(KeyCode::Home, 24, &mut state).unwrap();
+        assert_eq!(state.list_index, 1);
+
+        // Everything that could fight the sweep stays inert.
+        handle_key(KeyCode::Char(' '), 24, &mut state).unwrap();
+        assert_eq!(state.selection_count(), 0);
+        handle_key(KeyCode::Char('o'), 24, &mut state).unwrap();
+        assert_eq!(state.phase, AppPhase::Deleting);
+        handle_key(KeyCode::Char('q'), 24, &mut state).unwrap();
+        assert_eq!(state.phase, AppPhase::Deleting);
+        handle_key(KeyCode::Enter, 24, &mut state).unwrap();
+        assert_eq!(state.phase, AppPhase::Deleting);
+    }
+
+    #[test]
+    fn delete_worker_reports_one_update_per_path_then_done() {
+        use tempfile::TempDir;
+
+        // Two real directories so the worker exercises true removal.
+        let tmp = TempDir::new().unwrap();
+        let dirs = ["dir-one", "dir-two"]
+            .map(|d| tmp.path().join(d))
+            .map(|p| {
+                std::fs::create_dir_all(&p).unwrap();
+                p
+            })
+            .to_vec();
+
+        let mut state = AppState::new(PathBuf::from(tmp.path()));
+        state.delete_preference = DeletePreference::Permanent;
+        state.deleting_paths = dirs.clone();
+
+        let rx = spawn_delete_worker(&state);
+        let mut results = Vec::new();
+        while let Ok(update) = rx.recv() {
+            match update {
+                DeleteUpdate::Progress { .. } => results.push(update),
+                DeleteUpdate::Done => break,
+            }
+        }
+
+        assert_eq!(results.len(), 2, "one result per path");
+        for (update, dir) in results.into_iter().zip(&dirs) {
+            match update {
+                DeleteUpdate::Progress { path, ok } => {
+                    assert_eq!(path, *dir);
+                    assert!(ok, "removing a real empty dir succeeds");
+                }
+                DeleteUpdate::Done => unreachable!(),
+            }
+        }
+        assert!(!dirs[0].exists() && !dirs[1].exists());
     }
 
     #[test]

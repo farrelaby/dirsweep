@@ -28,6 +28,12 @@ pub fn render(state: &AppState, frame: &mut Frame) -> MouseZones {
     render_main(state, frame, areas[1], &mut zones);
     render_button_bar(state, frame, areas[2], &mut zones);
 
+    // A running sweep locks the whole interface: whatever zones the list or
+    // the bar registered, none is offered while the worker works underneath.
+    if state.phase == AppPhase::Deleting {
+        zones.clear();
+    }
+
     zones
 }
 
@@ -38,6 +44,33 @@ fn render_header(state: &AppState, frame: &mut Frame, area: Rect) {
     // asynchronously, so a zero total mid-flight is "unknown", not "empty".
     let (stats, stats_color) = if state.phase == AppPhase::Scanning {
         (String::new(), theme::SELECT)
+    } else if let Some(summary) = state.delete_result_summary.as_ref() {
+        // A finished sweep shows as a plain header notice — no centered
+        // panel for bookkeeping the shrinking "you can free" total already
+        // confirmed. It vanishes on the next action.
+        let color = if summary.contains("failed") || summary.contains("interrupted") {
+            theme::DANGER
+        } else {
+            theme::MUTED
+        };
+        (format!("  {summary}"), color)
+    } else if state.phase == AppPhase::Deleting {
+        // Same slot as the size pass: a one-line counter while rows vanish
+        // from the list in place — no modal takeover for a sweep.
+        let word = if state.delete_preference == DeletePreference::DryRun {
+            "previewing"
+        } else {
+            "sweeping"
+        };
+        (
+            format!(
+                "  {} {}/{}",
+                word,
+                state.deleting_index.min(state.deleting_paths.len()),
+                state.deleting_paths.len()
+            ),
+            theme::CAUTION,
+        )
     } else if state.sizes_total > 0 && !state.sizes_complete {
         (
             format!(
@@ -75,7 +108,7 @@ fn render_header(state: &AppState, frame: &mut Frame, area: Rect) {
 fn render_main(state: &AppState, frame: &mut Frame, area: Rect, zones: &mut MouseZones) {
     match state.phase {
         AppPhase::Scanning => render_scanning(state, frame, area),
-        AppPhase::Browsing => {
+        AppPhase::Browsing | AppPhase::Deleting => {
             if state.errors.is_empty() {
                 render_browsing(state, frame, area, zones);
             } else {
@@ -84,20 +117,10 @@ fn render_main(state: &AppState, frame: &mut Frame, area: Rect, zones: &mut Mous
                 render_browsing(state, frame, tree_area, zones);
                 render_errors(state, frame, error_area);
             }
-            // A finished sweep explains itself in place: a centered panel
-            // instead of a transient status-bar fragment that vanishes on the
-            // first keypress.
-            if let Some(ref summary) = state.delete_result_summary {
-                render_result_panel(summary, frame, area, zones);
-            }
         }
         AppPhase::ConfirmDelete => {
             render_browsing(state, frame, area, zones);
             render_confirm_dialog(state, frame, area, zones);
-        }
-        AppPhase::Deleting => {
-            render_browsing(state, frame, area, zones);
-            render_deleting(state, frame, area);
         }
         AppPhase::OrderDialog => {
             render_browsing(state, frame, area, zones);
@@ -571,116 +594,6 @@ fn render_confirm_dialog(state: &AppState, frame: &mut Frame, area: Rect, zones:
 /// Centered summary of a completed sweep. The border color carries the
 /// outcome at a glance: green for clean, red when anything failed. Clicking
 /// anywhere on the panel (or pressing any key) dismisses it.
-fn render_result_panel(summary: &str, frame: &mut Frame, area: Rect, zones: &mut MouseZones) {
-    let border_color = if summary.contains("failed") {
-        theme::DANGER
-    } else {
-        theme::SELECT
-    };
-
-    let title = if summary.contains("failed") {
-        " Sweep finished"
-    } else {
-        " Sweep complete"
-    };
-
-    let dialog_width = 60.min(area.width.saturating_sub(4));
-    let dialog_height = 7.min(area.height.saturating_sub(4).max(3));
-    let x = (area.width - dialog_width) / 2;
-    let y = (area.height - dialog_height) / 2;
-
-    let dialog_area = Rect {
-        x: area.x + x,
-        y: area.y + y,
-        width: dialog_width,
-        height: dialog_height,
-    };
-
-    frame.render_widget(Clear, dialog_area);
-
-    let lines = vec![
-        Line::from(Span::styled(title, theme::emphasis())),
-        Line::from(""),
-        Line::from(Span::styled(
-            format!(" {}", summary),
-            Style::default()
-                .fg(border_color)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(" Press any key to continue", theme::muted())),
-    ];
-
-    zones.push((dialog_area, MouseAction::Dismiss));
-
-    let dialog = Paragraph::new(Text::from(lines))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .style(Style::default().fg(border_color)),
-        )
-        .alignment(Alignment::Left);
-
-    frame.render_widget(dialog, dialog_area);
-}
-
-fn render_deleting(state: &AppState, frame: &mut Frame, area: Rect) {
-    let dialog_width = 36.min(area.width.saturating_sub(4));
-    let dialog_height = 9.min(area.height.saturating_sub(4));
-    let x = (area.width - dialog_width) / 2;
-    let y = (area.height - dialog_height) / 2;
-
-    let dialog_area = Rect {
-        x: area.x + x,
-        y: area.y + y,
-        width: dialog_width,
-        height: dialog_height,
-    };
-
-    frame.render_widget(Clear, dialog_area);
-
-    let current = state
-        .deleting_paths
-        .get(state.deleting_index)
-        .and_then(|p| p.file_name())
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
-
-    let progress = format!(
-        "{}/{}",
-        state.deleting_index + 1,
-        state.deleting_paths.len()
-    );
-
-    let lines = vec![
-        Line::from(Span::styled(
-            " Deleting...",
-            Style::default()
-                .fg(theme::CAUTION)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(format!("  {}", current), Style::default())),
-        Line::from(""),
-        Line::from(Span::styled(
-            format!("  {} complete", progress),
-            Style::default().fg(theme::MUTED),
-        )),
-    ];
-
-    let dialog = Paragraph::new(Text::from(lines))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .style(Style::default().fg(theme::STRUCTURE)),
-        )
-        .alignment(Alignment::Left);
-
-    frame.render_widget(dialog, dialog_area);
-}
-
 /// Persistent action bar: every action is a visible, clickable button that
 /// also names its keyboard shortcut, so the mouse and the keys teach each
 /// other. The cursor position indicator sits separately on the right.
@@ -1158,13 +1071,66 @@ mod tests {
     }
 
     #[test]
-    fn result_panel_announces_the_outcome_and_dismisses_on_click() {
+    fn deleting_state_keeps_the_list_with_a_header_counter() {
+        let mut state = AppState::new(PathBuf::from("/test"));
+        state.build_tree(two_project_output());
+        state.select_all();
+        state.phase = AppPhase::Deleting;
+        state.deleting_paths = vec![
+            PathBuf::from("/test/app-a/node_modules"),
+            PathBuf::from("/test/app-b/node_modules"),
+        ];
+        state.deleting_index = 1;
+        state.arm_sweep();
+
+        // Wide enough that every bar button — including Delete and Quit —
+        // gets drawn and would otherwise register a zone.
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        let mut zones = MouseZones::new();
+        terminal
+            .draw(|f| {
+                zones = render(&state, f);
+            })
+            .unwrap();
+
+        let text: String = (0..24u16).map(|r| row(&terminal, r)).collect();
+        // A real sweep takes the whole armed selection out of the list at
+        // once — rows must not linger as stale entries over folders that
+        // are already on their way out.
+        assert!(text.contains("sweeping 1/2"), "{text}");
+        assert!(!text.contains("app-a/node_modules"), "{text}");
+        assert!(!text.contains("app-b/node_modules"), "{text}");
+        // The whole interface is locked while the worker mutates the tree:
+        // no destructive actions are offered.
+        assert!(!zones.iter().any(|(_, a)| matches!(
+            a,
+            MouseAction::Delete | MouseAction::Confirm | MouseAction::Quit
+        )));
+
+        // A preview rehearses the same vanishing act; only the counter
+        // wording differs.
+        state.delete_preference = DeletePreference::DryRun;
+        state.build_tree(two_project_output());
+        state.select_all();
+        state.phase = AppPhase::Deleting;
+        state.deleting_index = 1;
+        state.arm_sweep();
+        terminal
+            .draw(|f| {
+                let _ = render(&state, f);
+            })
+            .unwrap();
+        let text: String = (0..24u16).map(|r| row(&terminal, r)).collect();
+        assert!(text.contains("previewing 1/2"), "{text}");
+        assert!(!text.contains("app-a/node_modules"), "{text}");
+    }
+
+    #[test]
+    fn sweep_result_is_a_header_notice_until_dismissed() {
         let mut state = AppState::new(PathBuf::from("/test"));
         state.build_tree(two_project_output());
         state.phase = AppPhase::Browsing;
-        state.delete_result_summary = Some(String::from(
-            "Done! 2 directory(ies) deleted, 2.9 MiB reclaimed",
-        ));
+        state.delete_result_summary = Some(String::from("swept 2 \u{b7} 2.9 MiB reclaimed"));
 
         let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
         let mut zones = MouseZones::new();
@@ -1175,21 +1141,21 @@ mod tests {
             .unwrap();
 
         let text: String = (0..20u16).map(|r| row(&terminal, r)).collect();
-        assert!(text.contains("Sweep complete"), "{text}");
-        assert!(text.contains("2 directory(ies) deleted"), "{text}");
-        assert!(text.contains("Press any key"), "{text}");
-        assert!(zones.iter().any(|(_, a)| *a == MouseAction::Dismiss));
+        // No centered panel — the outcome rides in the header.
+        assert!(text.contains("swept 2"), "{text}");
+        assert!(!text.contains("Sweep complete"), "{text}");
 
-        // Failures flip the panel to its caution variant.
-        state.delete_result_summary = Some(String::from("Done! 1 deleted, 1 failed"));
-        let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+        // Any action dismisses the notice; the header stats return.
+        state.clear_notification();
+        state.sizes_complete = true; // the scan's size pass would have finished
         terminal
             .draw(|f| {
                 let _ = render(&state, f);
             })
             .unwrap();
         let text: String = (0..20u16).map(|r| row(&terminal, r)).collect();
-        assert!(text.contains("Sweep finished"), "{text}");
+        assert!(!text.contains("swept 2"), "{text}");
+        assert!(text.contains("you can free"), "{text}");
     }
 
     #[test]

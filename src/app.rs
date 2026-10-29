@@ -180,6 +180,17 @@ pub enum TreeEntry {
     },
 }
 
+/// A target that left the tree when a sweep started, kept so a failed
+/// delete can restore its row — checkbox and group membership included.
+#[derive(Debug, Clone)]
+pub struct DeletedTarget {
+    pub entry: TreeEntry,
+    /// Name and languages of the group the target belonged to, so the
+    /// header can be rebuilt if its whole group already vanished.
+    pub project: String,
+    pub languages: Vec<String>,
+}
+
 #[derive(Debug)]
 pub struct AppState {
     pub tree: Vec<TreeEntry>,
@@ -200,9 +211,13 @@ pub struct AppState {
     pub sizes_complete: bool,
     pub ordered_by: OrderBy,
     pub order_cursor: OrderBy,
+    /// Dirs armed for removal, the worker's position in them, and the
+    /// per-sweep reclaim total — cleared together when a sweep completes.
     pub deleting_paths: Vec<PathBuf>,
     pub deleting_index: usize,
     pub deleting_failed: Vec<PathBuf>,
+    pub deleting_reclaimed: u64,
+    pub deleting_stash: HashMap<PathBuf, DeletedTarget>,
     pub target_index: HashMap<PathBuf, usize>,
     /// Number of sweepable targets in the tree, cached like
     /// `max_path_width`: the position counter and nothing else needs it, and
@@ -235,6 +250,8 @@ impl AppState {
             deleting_paths: Vec::new(),
             deleting_index: 0,
             deleting_failed: Vec::new(),
+            deleting_reclaimed: 0,
+            deleting_stash: HashMap::new(),
             target_index: HashMap::new(),
             target_count: 0,
             max_path_width: 0,
@@ -464,6 +481,105 @@ impl AppState {
             if self.list_index == before {
                 break;
             }
+        }
+    }
+
+    /// Arm a sweep: every selected target leaves the tree at once.
+    ///
+    /// The whole armed selection is committed — the interface locks until
+    /// the sweep finishes — so keeping the rows would only show stale
+    /// entries over directories that are already on their way out. Each
+    /// removed row is stashed with its group's project info so a failed
+    /// delete can restore it, checkbox included, afterwards.
+    pub fn arm_sweep(&mut self) {
+        self.deleting_stash = self.stash_selected();
+        self.remove_deleted_from_tree();
+    }
+    fn stash_selected(&self) -> HashMap<PathBuf, DeletedTarget> {
+        let mut stash = HashMap::new();
+        let mut project = String::new();
+        let mut languages: Vec<String> = Vec::new();
+
+        for entry in &self.tree {
+            match entry {
+                TreeEntry::ProjectHeader {
+                    name,
+                    languages: langs,
+                } => {
+                    project = name.clone();
+                    languages = langs.clone();
+                }
+                TreeEntry::TargetDir { path, .. } => {
+                    if self.selected.contains(path) {
+                        stash.insert(
+                            path.clone(),
+                            DeletedTarget {
+                                entry: entry.clone(),
+                                project: project.clone(),
+                                languages: languages.clone(),
+                            },
+                        );
+                    }
+                }
+            }
+        }
+
+        stash
+    }
+
+    /// Put a failed delete's row back where its group lives — appended after
+    /// the group's last surviving child, or as a rebuilt group (header
+    /// recreated from the stash) when every sibling already succeeded. The
+    /// checkbox and all derived counts come back with it, so a retry is one
+    /// Enter away.
+    pub fn reinsert_target(&mut self, stashed: DeletedTarget) {
+        let (path, size) = match &stashed.entry {
+            TreeEntry::TargetDir { path, size, .. } => (path.clone(), *size),
+            _ => return,
+        };
+
+        let mut found_group_at = None;
+        for (idx, entry) in self.tree.iter().enumerate() {
+            if let TreeEntry::ProjectHeader { name, .. } = entry
+                && name == &stashed.project
+            {
+                found_group_at = Some(idx);
+                break;
+            }
+        }
+
+        match found_group_at {
+            Some(group) => {
+                // End of the group: first entry after it that is not a target.
+                let mut end = group + 1;
+                while end < self.tree.len() && matches!(self.tree[end], TreeEntry::TargetDir { .. })
+                {
+                    end += 1;
+                }
+                self.tree.insert(end, stashed.entry);
+            }
+            None => {
+                self.tree.push(TreeEntry::ProjectHeader {
+                    name: stashed.project,
+                    languages: stashed.languages,
+                });
+                self.tree.push(stashed.entry);
+            }
+        }
+
+        self.selected.insert(path);
+        self.total_selected_size += size;
+        self.total_reclaimable += size;
+        self.recompute_target_count();
+        self.rebuild_target_index();
+        self.recompute_max_path_width();
+        self.clamp_index();
+        if !self.tree.is_empty() && self.is_header() {
+            self.list_index = self
+                .tree
+                .iter()
+                .position(|e| matches!(e, TreeEntry::TargetDir { .. }))
+                .unwrap_or(0);
         }
     }
 
@@ -1174,6 +1290,80 @@ mod tests {
             state.current_entry(),
             Some(TreeEntry::TargetDir { .. })
         ));
+    }
+
+    #[test]
+    fn test_arm_sweep_stashes_and_reinsert_restores_the_group() {
+        // Full arm of a two-project tree: everything vanished, both rows
+        // stashed with their project's identity.
+        let mut state = AppState::new(PathBuf::from("/test"));
+        state.build_tree(two_project_scan_output());
+        state.select_all();
+        state.arm_sweep();
+        assert_eq!(state.tree.len(), 0);
+        assert_eq!(state.deleting_stash.len(), 2);
+
+        // One delete failed: its group comes back intact, checked.
+        let stashed = state
+            .deleting_stash
+            .remove(&PathBuf::from("/test/app-a/node_modules"))
+            .unwrap();
+        state.reinsert_target(stashed);
+        assert_eq!(state.tree.len(), 2);
+        assert!(matches!(&state.tree[0], TreeEntry::ProjectHeader { name, .. } if name == "app-a"));
+        assert!(matches!(&state.tree[1], TreeEntry::TargetDir { .. }));
+        assert_eq!(state.selection_count(), 1);
+        assert!(matches!(
+            state.current_entry(),
+            Some(TreeEntry::TargetDir { .. })
+        ));
+
+        // When a group's whole family already vanished, the failure rebuilds
+        // — header recreated from the stash at the end of the tree.
+        state
+            .deleting_stash
+            .remove(&PathBuf::from("/test/app-b/node_modules"));
+        let stashed = DeletedTarget {
+            entry: TreeEntry::TargetDir {
+                path: PathBuf::from("/test/app-b/node_modules"),
+                size: 2_000,
+                last_modified: Utc::now(),
+            },
+            project: String::from("app-b"),
+            languages: vec!["js".to_string()],
+        };
+        state.reinsert_target(stashed);
+        assert_eq!(state.tree.len(), 4);
+        assert!(matches!(&state.tree[2], TreeEntry::ProjectHeader { name, .. } if name == "app-b"));
+        assert!(matches!(
+            state.current_entry(),
+            Some(TreeEntry::TargetDir { .. })
+        ));
+    }
+
+    #[test]
+    fn test_reinsert_appends_to_a_surviving_group() {
+        // Single project, two targets: one succeeds, one fails — the failure
+        // must land inside the surviving group, not at the tree end.
+        let mut state = AppState::new(PathBuf::from("/test"));
+        state.build_tree(make_scan_output());
+        state.list_index = 1;
+        state.toggle_selection(); // node_modules only
+        let node_modules = PathBuf::from("/test/my-app/node_modules");
+        assert!(state.selected.contains(&node_modules));
+
+        state.arm_sweep();
+        assert_eq!(state.tree.len(), 2, "the group survives with .next");
+
+        let stashed = state.deleting_stash.remove(&node_modules).unwrap();
+        state.reinsert_target(stashed);
+        assert_eq!(state.tree.len(), 3);
+        assert!(matches!(state.tree[2], TreeEntry::TargetDir { .. }));
+        assert_eq!(state.selection_count(), 1);
+        assert_eq!(
+            state.total_reclaimable, 1_700_000_000,
+            "checkbox and reclaimable total restored"
+        );
     }
 
     #[test]

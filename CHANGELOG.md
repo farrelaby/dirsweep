@@ -39,8 +39,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 - `q`, `Esc`, and `Ctrl-C` quit immediately: nothing destructive happens on close, so the quit confirmation dialog was removed
 - Sort dialog relabeled "Order by" → "Sort by"; all existing keybindings preserved (`Space`, `a`, `d`, `o`, `Enter`, `?` is the only newly added key)
 - Sort options display their number (`1`–`6`), and pressing that digit in the dialog jumps straight to the option — Enter still applies
-- Project groups in the tree are no longer separated by a blank spacer row; color and bold alone mark the group boundaries, keeping the list one row tighter per group the sort
-
+- Project groups in the tree are no longer separated by a blank spacer row; color and bold alone mark the group boundaries, keeping the list one row tighter per group
+- Deletion runs on a background worker with the interface locked only for its duration — cursor movement (arrow keys, `Home`/`End`, paging, mouse wheel) stays live — and all modes vanish the armed rows from the list the moment the sweep starts: a real sweep brings back only failed deletes (checked, one Enter from a retry), while a preview puts every row back exactly as it was. The outcome is a plain header notice — `swept 3 · 1.2 GiB reclaimed`, red-highlighted when anything failed, `would sweep…` for previews — instead of a centered dialog
+- `Ctrl-C` during a sweep defers the quit until the sweep finishes (with an explanatory note in the errors area) instead of killing the worker mid-delete and leaving a half-swept tree behind
+- A panicked deletion worker finalizes the sweep as interrupted instead of wedging the interface in its locked phase: every not-yet-reported row returns checked, and the header shows a red `sweep interrupted · N restored`
+- Rows restored at the end of a sweep (failures, or everything in a preview) are re-sorted by the active sort order instead of tacked onto the end of their group
 - The cursor position in the action bar now counts sweepable directories only; it used to include project headers, so the first directory in a two-project scan read "3/4" instead of "1/2"
 
 ### Performance
