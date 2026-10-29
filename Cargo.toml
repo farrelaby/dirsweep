@@ -15,7 +15,7 @@ authors = ["farrelaby"]
 chrono = "0.4.45"
 clap = { version = "4.6.1", features = ["derive"] }
 crossterm = "0.29.0"
-dua-core = "4"
+dua-core = "5"
 humansize = "2.1.3"
 ratatui = { version = "0.30.2", features = ["crossterm"] }
 rayon = "1"

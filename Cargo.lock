@@ -628,9 +628,9 @@ dependencies = [
 
 [[package]]
 name = "dua-core"
-version = "4.2.0"
+version = "5.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d687862f3206e7c660daeb6ab0200c65e58fccd7e508819e4bd9949304c640a8"
+checksum = "02d77e9f635834c9014b571f93f80cfcdd49ece0408e33f44ef59824155f77fc"
 dependencies = [
  "crossbeam",
  "libc",
