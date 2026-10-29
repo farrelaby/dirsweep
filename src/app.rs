@@ -2,8 +2,49 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
+use ratatui::layout::Rect;
 
 use crate::scanner::{ScanOutput, ScannedDir};
+
+/// What a click at a screen position does.
+///
+/// The renderer registers clickable regions as `(Rect, MouseAction)` each
+/// frame; the event loop hit-tests clicks against the newest frame's regions
+/// in reverse render order, so widgets drawn last (dialogs) win. Actions are
+/// phase-scoped by construction: a region only exists in the frames of the
+/// phase that registered it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MouseAction {
+    /// Toggle the selection of the row under the cursor.
+    Toggle,
+    /// Move the cursor onto this tree entry (project headers).
+    MoveTo(usize),
+    /// Move the cursor onto this tree entry and toggle its selection.
+    ToggleAt(usize),
+    SelectAll,
+    DeselectAll,
+    OpenSort,
+    /// Open the help overlay.
+    OpenHelp,
+    /// Open the delete confirmation (no-op with an empty selection).
+    Delete,
+    Quit,
+    /// Confirm the active dialog (Enter equivalent).
+    Confirm,
+    /// Cancel the active dialog (Esc equivalent).
+    Cancel,
+    /// Pick a mode in the delete chooser.
+    SetDeleteMode(DeletePreference),
+    /// Pick a sort order in the sort dialog (cursor only).
+    SortBy(OrderBy),
+    /// Apply the picked sort order.
+    ApplySort,
+    /// Dismiss a transient overlay (result notice, later: help).
+    Dismiss,
+}
+
+/// Clickable regions of the most recently rendered frame.
+pub type MouseZones = Vec<(Rect, MouseAction)>;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AppPhase {
@@ -11,7 +52,7 @@ pub enum AppPhase {
     Browsing,
     ConfirmDelete,
     Deleting,
-    ConfirmQuit,
+    Help,
     OrderDialog,
     Quit,
 }
@@ -33,7 +74,65 @@ pub enum OrderBy {
     SizeDesc,
 }
 
+impl DeletePreference {
+    pub fn label(&self) -> &'static str {
+        match self {
+            DeletePreference::DryRun => "Preview only",
+            DeletePreference::Trash => "Move to Trash",
+            DeletePreference::Permanent => "Delete permanently",
+        }
+    }
+
+    pub fn description(&self) -> &'static str {
+        match self {
+            DeletePreference::DryRun => "show what would be deleted, change nothing",
+            DeletePreference::Trash => "recoverable \u{b7} recommended",
+            DeletePreference::Permanent => "cannot be undone",
+        }
+    }
+
+    /// Mode below the current one, without wrapping. The wrap historically
+    /// sent `Up` from "Preview" straight to the destructive option — the one
+    /// navigation a first-time user must never trip into.
+    pub fn step_back(self) -> Self {
+        match self {
+            DeletePreference::DryRun => DeletePreference::DryRun,
+            DeletePreference::Trash => DeletePreference::DryRun,
+            DeletePreference::Permanent => DeletePreference::Trash,
+        }
+    }
+
+    /// Mode above the current one, without wrapping.
+    pub fn step_forward(self) -> Self {
+        match self {
+            DeletePreference::DryRun => DeletePreference::Trash,
+            DeletePreference::Trash => DeletePreference::Permanent,
+            DeletePreference::Permanent => DeletePreference::Permanent,
+        }
+    }
+}
+
 impl OrderBy {
+    /// Display order of the sort dialog, top to bottom.
+    pub const ALL: [OrderBy; 6] = [
+        OrderBy::NameAsc,
+        OrderBy::NameDesc,
+        OrderBy::DateAsc,
+        OrderBy::DateDesc,
+        OrderBy::SizeAsc,
+        OrderBy::SizeDesc,
+    ];
+
+    /// Clamped step within [`OrderBy::ALL`]: +1 down, -1 up, never wrapping.
+    pub fn step(self, delta: isize) -> Self {
+        let position = Self::ALL
+            .iter()
+            .position(|o| *o == self)
+            .unwrap_or_default();
+        let next = (position as isize + delta).clamp(0, Self::ALL.len() as isize - 1);
+        Self::ALL[next as usize]
+    }
+
     pub fn label(&self) -> &str {
         match self {
             OrderBy::NameAsc => "Name (A \u{2192} Z)",
@@ -81,6 +180,17 @@ pub enum TreeEntry {
     },
 }
 
+/// A target that left the tree when a sweep started, kept so a failed
+/// delete can restore its row — checkbox and group membership included.
+#[derive(Debug, Clone)]
+pub struct DeletedTarget {
+    pub entry: TreeEntry,
+    /// Name and languages of the group the target belonged to, so the
+    /// header can be rebuilt if its whole group already vanished.
+    pub project: String,
+    pub languages: Vec<String>,
+}
+
 #[derive(Debug)]
 pub struct AppState {
     pub tree: Vec<TreeEntry>,
@@ -101,10 +211,18 @@ pub struct AppState {
     pub sizes_complete: bool,
     pub ordered_by: OrderBy,
     pub order_cursor: OrderBy,
+    /// Dirs armed for removal, the worker's position in them, and the
+    /// per-sweep reclaim total — cleared together when a sweep completes.
     pub deleting_paths: Vec<PathBuf>,
     pub deleting_index: usize,
     pub deleting_failed: Vec<PathBuf>,
+    pub deleting_reclaimed: u64,
+    pub deleting_stash: HashMap<PathBuf, DeletedTarget>,
     pub target_index: HashMap<PathBuf, usize>,
+    /// Number of sweepable targets in the tree, cached like
+    /// `max_path_width`: the position counter and nothing else needs it, and
+    /// its inputs change only when the tree does.
+    target_count: usize,
     max_path_width: usize,
 }
 
@@ -132,7 +250,10 @@ impl AppState {
             deleting_paths: Vec::new(),
             deleting_index: 0,
             deleting_failed: Vec::new(),
+            deleting_reclaimed: 0,
+            deleting_stash: HashMap::new(),
             target_index: HashMap::new(),
+            target_count: 0,
             max_path_width: 0,
         }
     }
@@ -201,6 +322,7 @@ impl AppState {
                 }
             })
             .sum();
+        self.recompute_target_count();
         self.rebuild_target_index();
         self.recompute_max_path_width();
         self.clamp_index();
@@ -274,6 +396,193 @@ impl AppState {
         self.selected.len()
     }
 
+    /// Number of sweepable targets in the tree (project headers excluded).
+    pub fn target_count(&self) -> usize {
+        self.target_count
+    }
+
+    /// 1-based position of the cursor among sweepable targets.
+    ///
+    /// Counts the `TargetDir` entries at or before `list_index`: navigation
+    /// skips headers and mouse clicks can rest on one, so the number holds
+    /// still over a group header instead of counting it. A cursor before the
+    /// first target reports 0.
+    pub fn target_position(&self) -> usize {
+        if self.tree.is_empty() {
+            return 0;
+        }
+        let upto = self.list_index.min(self.tree.len() - 1);
+        self.tree[..=upto]
+            .iter()
+            .filter(|e| matches!(e, TreeEntry::TargetDir { .. }))
+            .count()
+    }
+
+    /// Refresh the cached target count. Called wherever the tree gains or
+    /// loses entries; reordering (`order_tree`) must not recompute it — the
+    /// count is unchanged.
+    fn recompute_target_count(&mut self) {
+        self.target_count = self
+            .tree
+            .iter()
+            .filter(|e| matches!(e, TreeEntry::TargetDir { .. }))
+            .count();
+    }
+
+    /// Move the cursor onto a specific tree entry (mouse row click).
+    pub fn jump_to(&mut self, index: usize) {
+        if index < self.tree.len() {
+            self.list_index = index;
+        }
+    }
+
+    /// Jump to the first sweepable target (never a project header).
+    pub fn move_start(&mut self) {
+        if let Some(i) = self
+            .tree
+            .iter()
+            .position(|e| matches!(e, TreeEntry::TargetDir { .. }))
+        {
+            self.list_index = i;
+        }
+    }
+
+    /// Jump to the last sweepable target (never a project header).
+    pub fn move_end(&mut self) {
+        if let Some(i) = self
+            .tree
+            .iter()
+            .rposition(|e| matches!(e, TreeEntry::TargetDir { .. }))
+        {
+            self.list_index = i;
+        }
+    }
+
+    /// Page the cursor up by `rows` rows.
+    ///
+    /// Implemented as repeated single steps — which already skip headers and
+    /// clamp at the first target — with an early exit once a step moves
+    /// nothing, so no geometry of the tree is duplicated here.
+    pub fn page_up(&mut self, rows: usize) {
+        for _ in 0..rows {
+            let before = self.list_index;
+            self.move_up();
+            if self.list_index == before {
+                break;
+            }
+        }
+    }
+
+    /// Page the cursor down by `rows` rows, clamped at the last target.
+    pub fn page_down(&mut self, rows: usize) {
+        for _ in 0..rows {
+            let before = self.list_index;
+            self.move_down();
+            if self.list_index == before {
+                break;
+            }
+        }
+    }
+
+    /// Arm a sweep: every selected target leaves the tree at once.
+    ///
+    /// The whole armed selection is committed — the interface locks until
+    /// the sweep finishes — so keeping the rows would only show stale
+    /// entries over directories that are already on their way out. Each
+    /// removed row is stashed with its group's project info so a failed
+    /// delete can restore it, checkbox included, afterwards.
+    pub fn arm_sweep(&mut self) {
+        self.deleting_stash = self.stash_selected();
+        self.remove_deleted_from_tree();
+    }
+    fn stash_selected(&self) -> HashMap<PathBuf, DeletedTarget> {
+        let mut stash = HashMap::new();
+        let mut project = String::new();
+        let mut languages: Vec<String> = Vec::new();
+
+        for entry in &self.tree {
+            match entry {
+                TreeEntry::ProjectHeader {
+                    name,
+                    languages: langs,
+                } => {
+                    project = name.clone();
+                    languages = langs.clone();
+                }
+                TreeEntry::TargetDir { path, .. } => {
+                    if self.selected.contains(path) {
+                        stash.insert(
+                            path.clone(),
+                            DeletedTarget {
+                                entry: entry.clone(),
+                                project: project.clone(),
+                                languages: languages.clone(),
+                            },
+                        );
+                    }
+                }
+            }
+        }
+
+        stash
+    }
+
+    /// Put a failed delete's row back where its group lives — appended after
+    /// the group's last surviving child, or as a rebuilt group (header
+    /// recreated from the stash) when every sibling already succeeded. The
+    /// checkbox and all derived counts come back with it, so a retry is one
+    /// Enter away.
+    pub fn reinsert_target(&mut self, stashed: DeletedTarget) {
+        let (path, size) = match &stashed.entry {
+            TreeEntry::TargetDir { path, size, .. } => (path.clone(), *size),
+            _ => return,
+        };
+
+        let mut found_group_at = None;
+        for (idx, entry) in self.tree.iter().enumerate() {
+            if let TreeEntry::ProjectHeader { name, .. } = entry
+                && name == &stashed.project
+            {
+                found_group_at = Some(idx);
+                break;
+            }
+        }
+
+        match found_group_at {
+            Some(group) => {
+                // End of the group: first entry after it that is not a target.
+                let mut end = group + 1;
+                while end < self.tree.len() && matches!(self.tree[end], TreeEntry::TargetDir { .. })
+                {
+                    end += 1;
+                }
+                self.tree.insert(end, stashed.entry);
+            }
+            None => {
+                self.tree.push(TreeEntry::ProjectHeader {
+                    name: stashed.project,
+                    languages: stashed.languages,
+                });
+                self.tree.push(stashed.entry);
+            }
+        }
+
+        self.selected.insert(path);
+        self.total_selected_size += size;
+        self.total_reclaimable += size;
+        self.recompute_target_count();
+        self.rebuild_target_index();
+        self.recompute_max_path_width();
+        self.clamp_index();
+        if !self.tree.is_empty() && self.is_header() {
+            self.list_index = self
+                .tree
+                .iter()
+                .position(|e| matches!(e, TreeEntry::TargetDir { .. }))
+                .unwrap_or(0);
+        }
+    }
+
     pub fn remove_deleted_from_tree(&mut self) {
         let deleted = std::mem::take(&mut self.selected);
         let old_tree = std::mem::take(&mut self.tree);
@@ -323,6 +632,7 @@ impl AppState {
                 }
             })
             .sum();
+        self.recompute_target_count();
         self.rebuild_target_index();
         self.recompute_max_path_width();
         self.clamp_index();
@@ -899,6 +1209,219 @@ mod tests {
             state.move_up();
         }
         assert_eq!(state.list_index, 1);
+    }
+
+    #[test]
+    fn test_jump_to_moves_cursor_only_within_tree() {
+        let mut state = AppState::new(PathBuf::from("/test"));
+        state.build_tree(make_scan_output());
+        assert_eq!(state.tree.len(), 3);
+
+        state.jump_to(2);
+        assert_eq!(state.list_index, 2);
+
+        state.jump_to(99);
+        assert_eq!(state.list_index, 2, "out-of-range jumps are ignored");
+    }
+
+    /// Tree layout: [0] header, [1] node_modules, [2] header, [3] .next.
+    /// Tree layout with two projects: [0] header, [1] target, [2] header,
+    /// [3] target — the layout that exposes header-counting mistakes.
+    fn two_project_scan_output() -> ScanOutput {
+        let mk = |name: &str| ProjectInfo {
+            path: PathBuf::from(format!("/test/{name}")),
+            name: name.to_string(),
+            languages: vec!["js".to_string()],
+            children: vec![PathBuf::from(format!("/test/{name}/node_modules"))],
+        };
+
+        ScanOutput {
+            target_dirs: vec![
+                ScannedDir {
+                    path: PathBuf::from("/test/app-a/node_modules"),
+                    size: 1_000,
+                    last_modified: Utc::now(),
+                    error: None,
+                },
+                ScannedDir {
+                    path: PathBuf::from("/test/app-b/node_modules"),
+                    size: 2_000,
+                    last_modified: Utc::now(),
+                    error: None,
+                },
+            ],
+            projects: vec![mk("app-a"), mk("app-b")],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_start_end_and_page_land_on_targets() {
+        // Tree: [0] header, [1] target, [2] header, [3] target.
+        let mut state = AppState::new(PathBuf::from("/test"));
+        state.build_tree(two_project_scan_output());
+
+        state.jump_to(3);
+        state.move_start();
+        assert_eq!(state.list_index, 1, "start lands on the first target");
+
+        state.jump_to(1);
+        state.move_end();
+        assert_eq!(state.list_index, 3, "end lands on the last target");
+
+        // Paging skips headers and clamps at both ends.
+        state.list_index = 1;
+        state.page_down(10);
+        assert_eq!(state.list_index, 3, "page down clamps at the last target");
+
+        state.page_down(10);
+        assert_eq!(state.list_index, 3, "further page downs stay put");
+
+        state.page_up(10);
+        assert_eq!(state.list_index, 1, "page up clamps at the first target");
+
+        state.page_up(10);
+        assert_eq!(state.list_index, 1, "further page ups stay put");
+
+        // Pages never strand the cursor on a header.
+        state.list_index = 3;
+        state.page_up(1);
+        assert!(matches!(
+            state.current_entry(),
+            Some(TreeEntry::TargetDir { .. })
+        ));
+    }
+
+    #[test]
+    fn test_arm_sweep_stashes_and_reinsert_restores_the_group() {
+        // Full arm of a two-project tree: everything vanished, both rows
+        // stashed with their project's identity.
+        let mut state = AppState::new(PathBuf::from("/test"));
+        state.build_tree(two_project_scan_output());
+        state.select_all();
+        state.arm_sweep();
+        assert_eq!(state.tree.len(), 0);
+        assert_eq!(state.deleting_stash.len(), 2);
+
+        // One delete failed: its group comes back intact, checked.
+        let stashed = state
+            .deleting_stash
+            .remove(&PathBuf::from("/test/app-a/node_modules"))
+            .unwrap();
+        state.reinsert_target(stashed);
+        assert_eq!(state.tree.len(), 2);
+        assert!(matches!(&state.tree[0], TreeEntry::ProjectHeader { name, .. } if name == "app-a"));
+        assert!(matches!(&state.tree[1], TreeEntry::TargetDir { .. }));
+        assert_eq!(state.selection_count(), 1);
+        assert!(matches!(
+            state.current_entry(),
+            Some(TreeEntry::TargetDir { .. })
+        ));
+
+        // When a group's whole family already vanished, the failure rebuilds
+        // — header recreated from the stash at the end of the tree.
+        state
+            .deleting_stash
+            .remove(&PathBuf::from("/test/app-b/node_modules"));
+        let stashed = DeletedTarget {
+            entry: TreeEntry::TargetDir {
+                path: PathBuf::from("/test/app-b/node_modules"),
+                size: 2_000,
+                last_modified: Utc::now(),
+            },
+            project: String::from("app-b"),
+            languages: vec!["js".to_string()],
+        };
+        state.reinsert_target(stashed);
+        assert_eq!(state.tree.len(), 4);
+        assert!(matches!(&state.tree[2], TreeEntry::ProjectHeader { name, .. } if name == "app-b"));
+        assert!(matches!(
+            state.current_entry(),
+            Some(TreeEntry::TargetDir { .. })
+        ));
+    }
+
+    #[test]
+    fn test_reinsert_appends_to_a_surviving_group() {
+        // Single project, two targets: one succeeds, one fails — the failure
+        // must land inside the surviving group, not at the tree end.
+        let mut state = AppState::new(PathBuf::from("/test"));
+        state.build_tree(make_scan_output());
+        state.list_index = 1;
+        state.toggle_selection(); // node_modules only
+        let node_modules = PathBuf::from("/test/my-app/node_modules");
+        assert!(state.selected.contains(&node_modules));
+
+        state.arm_sweep();
+        assert_eq!(state.tree.len(), 2, "the group survives with .next");
+
+        let stashed = state.deleting_stash.remove(&node_modules).unwrap();
+        state.reinsert_target(stashed);
+        assert_eq!(state.tree.len(), 3);
+        assert!(matches!(state.tree[2], TreeEntry::TargetDir { .. }));
+        assert_eq!(state.selection_count(), 1);
+        assert_eq!(
+            state.total_reclaimable, 1_700_000_000,
+            "checkbox and reclaimable total restored"
+        );
+    }
+
+    #[test]
+    fn test_target_position_counts_targets_only() {
+        let mut state = AppState::new(PathBuf::from("/test"));
+        state.build_tree(two_project_scan_output());
+        assert_eq!(state.target_count(), 2);
+
+        // Tree: [0] header, [1] target, [2] header, [3] target.
+        state.list_index = 1;
+        assert_eq!(state.target_position(), 1);
+
+        // A mouse click resting on a header holds the previous number
+        // instead of counting the header.
+        state.list_index = 2;
+        assert_eq!(state.target_position(), 1);
+
+        state.list_index = 3;
+        assert_eq!(state.target_position(), 2);
+
+        state.list_index = 0;
+        assert_eq!(state.target_position(), 0, "before the first target");
+
+        // Deleting entries shrinks the count together with the tree.
+        state.list_index = 1;
+        state.toggle_selection();
+        state.remove_deleted_from_tree();
+        assert_eq!(state.target_count(), 1);
+        assert_eq!(state.target_position(), 1);
+    }
+
+    #[test]
+    fn test_delete_preference_steps_clamp_without_wrapping() {
+        use DeletePreference::{DryRun, Permanent, Trash};
+        assert_eq!(DryRun.step_back(), DryRun, "Up at the top must stay put");
+        assert_eq!(DryRun.step_forward(), Trash);
+        assert_eq!(Trash.step_back(), DryRun);
+        assert_eq!(Trash.step_forward(), Permanent);
+        assert_eq!(
+            Permanent.step_forward(),
+            Permanent,
+            "Down at the bottom must stay put"
+        );
+        assert_eq!(Permanent.step_back(), Trash);
+    }
+
+    #[test]
+    fn test_order_by_step_clamps_without_wrapping() {
+        use OrderBy::{DateAsc, NameAsc, NameDesc, SizeDesc};
+        assert_eq!(NameAsc.step(-1), NameAsc, "Up at the top must stay put");
+        assert_eq!(NameAsc.step(1), NameDesc);
+        assert_eq!(NameAsc.step(100), SizeDesc, "large steps clamp to the end");
+        assert_eq!(
+            SizeDesc.step(1),
+            SizeDesc,
+            "Down at the bottom must stay put"
+        );
+        assert_eq!(DateAsc.step(-1), NameDesc);
     }
 
     #[test]

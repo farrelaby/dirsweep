@@ -72,18 +72,21 @@ dirsweep uninstall --force  # skip confirmation
 ## TUI preview
 
 ```
- dirsweep — /home/user/projects  |  6.8 GiB reclaimable  |  scan 0.6s
+ dirsweep — /home/user/projects  ·  6.8 GiB you can free  ·  scanned in 0.6s
 
    my-app (pnpm)
- ▶ └ [●] node_modules    1.2 GiB   3 days ago
+   └ [●] node_modules    1.2 GiB   3 days ago
      [●] dist            800 MiB   2 days ago
    rust-project (cargo)
    └ [●] target          4.5 GiB   10 days ago
    my-other-app (npm)
      [ ] .next           350 MiB   just now
 
- [Space] toggle  [a] all  [d] none  [Enter] delete  [q] quit  3 selected | 6.50 GiB | 1/6
+ [Space] Toggle  [a] All  [d] None  [o] Sort  [?] Help  [Enter] Delete (3 · 6.50 GiB)  [q] Quit   1/4
 ```
+
+Everything on the bar is clickable — and so are the rows and the dialog
+options. Press `?` in the app to see every key at once.
 
 ## Supported targets
 
