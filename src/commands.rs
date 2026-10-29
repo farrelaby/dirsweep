@@ -107,10 +107,9 @@ pub fn find_checksums_url(assets: &[serde_json::Value]) -> Option<String> {
 }
 
 fn download_file(url: &str, dest: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let response = ureq::get(url).set("User-Agent", "dirsweep").call()?;
-
+    let response = ureq::get(url).header("User-Agent", "dirsweep").call()?;
     let mut file = std::fs::File::create(dest)?;
-    let mut reader = response.into_reader();
+    let mut reader = response.into_body().into_reader();
     io::copy(&mut reader, &mut file)?;
     Ok(())
 }
@@ -131,7 +130,11 @@ fn verify_checksum(file_path: &Path, expected_hash: &str) -> bool {
         }
     }
 
-    let actual_hash = format!("{:x}", hasher.finalize());
+    let actual_hash: String = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
     actual_hash.eq_ignore_ascii_case(expected_hash)
 }
 
@@ -201,9 +204,10 @@ pub fn cmd_update() -> Result<(), Box<dyn std::error::Error>> {
         GITHUB_REPO
     );
     let response: serde_json::Value = ureq::get(&url)
-        .set("User-Agent", "dirsweep")
+        .header("User-Agent", "dirsweep")
         .call()?
-        .into_json()?;
+        .body_mut()
+        .read_json()?;
 
     let tag = response["tag_name"]
         .as_str()
