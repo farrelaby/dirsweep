@@ -131,7 +131,11 @@ fn verify_checksum(file_path: &Path, expected_hash: &str) -> bool {
         }
     }
 
-    let actual_hash = format!("{:x}", hasher.finalize());
+    let actual_hash: String = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
     actual_hash.eq_ignore_ascii_case(expected_hash)
 }
 
