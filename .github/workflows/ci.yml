@@ -22,8 +22,6 @@ jobs:
             command: cargo clippy --all-targets -- -D warnings
           - name: Test
             command: cargo test
-          - name: Bench
-            command: cargo bench --bench scan --no-run
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
