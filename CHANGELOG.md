@@ -6,7 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
-## [0.4.0] - 2026-10-29
+### Added
+- GitHub Actions OIDC trusted publishing for crates.io and npm: the release workflow exchanges short-lived OIDC tokens for publish credentials instead of holding long-lived `CARGO_REGISTRY_TOKEN`/`NPM_TOKEN` secrets; npm releases now carry build provenance, and third-party actions are pinned to commit SHAs (`release.yml`)
+
+## [0.4.0] - 2026-10-30
 
 ### Added
 - Criterion benchmark harness (`benches/scan.rs`) timing the scan core phase by phase: `pipeline`, `scan`, `build_tree`, `size`, `render`
