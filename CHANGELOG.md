@@ -6,6 +6,77 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+### Added
+- GitHub Actions OIDC trusted publishing for crates.io and npm: the release workflow exchanges short-lived OIDC tokens for publish credentials instead of holding long-lived `CARGO_REGISTRY_TOKEN`/`NPM_TOKEN` secrets; npm releases now carry build provenance, and third-party actions are pinned to commit SHAs (`release.yml`)
+
+## [0.4.0] - 2026-10-30
+
+### Added
+- Criterion benchmark harness (`benches/scan.rs`) timing the scan core phase by phase: `pipeline`, `scan`, `build_tree`, `size`, `render`
+- Deterministic seeded fixture generator for benchmarks, replacing the non-deterministic `$RANDOM` fixtures in `bench/bench.sh`
+- Size-computation benchmark, replicating the worker loop in `main.rs` — previously unmeasured, as the TUI discards it before it completes
+- `ScanStats` work counters on `ScanOutput` (directories entered, files seen, subtrees pruned, detection hits) for machine-independent before/after comparison
+- CI `Bench` step (`cargo bench --bench scan --no-run`) so the harness cannot silently rot
+- Pre-rewrite benchmark baseline recorded in `bench/BASELINE.md`, with machine-readable numbers in `bench/baseline.json`
+- Per-phase timing on `ScanStats` (`pass1_us`, `project_build_us`, `pass2_us`) and a benchmark table splitting `scan` across its three phases, so a parallel walker can be aimed at the pass that dominates
+- `size_par` benchmark group measuring the parallel size fan-out, kept alongside the sequential `size` group so the speedup is measured within a single run
+- Test asserting hidden files inside a target dir count toward its size — guards against walkers that skip dotfiles by default, which would otherwise underreport silently
+- Recognition of legacy Bun lockfile `bun.lockb` (`config.rs`)
+- Fallback error in `detect_target` for unsupported platforms (`commands.rs`)
+- Cryptographic SHA-256 verification of downloaded binary archives against `checksums.txt` in npm postinstall (`npm/install.js`)
+- Pre-publish version check in CI release workflow ensuring `Cargo.toml` matches git release tag (`release.yml`)
+- Clickable action bar where every command is a visible button that still names its keyboard shortcut, plus full mouse support: click rows to toggle, click headers to move the cursor, mouse-wheel scrolling, and clickable dialog options and hints
+- `?` help overlay listing every key and button in plain language, grouped by purpose, also reachable from the bar's `[?] Help` button
+- Semantic theme module (`src/theme.rs`) with one color per meaning; the delete chooser describes each mode's consequence in plain words, and the interface now has a proper visual hierarchy (danger is red, in-progress is amber, metadata is muted)
+- `Home`/`End` jump the cursor to the first/last sweepable directory, and `PageUp`/`PageDown` jump half a screen at a time (documented in the help overlay)
+
+### Changed
+- CI clippy now lints all targets (`--all-targets`), covering benches
+- `[profile.bench]` sets `opt-level = 3`, overriding the release `-z`, so benchmarks isolate algorithmic change from optimizer behaviour
+- `build_tree` indexes target dirs in a `HashMap` once instead of rescanning them per project, taking it from O(projects × targets) to O(projects + targets)
+- The size worker fans target walks out across rayon rather than walking every target sequentially on one thread; results still stream per target so the UI fills in progressively
+- Benchmark comparison uses `--baseline-lenient` instead of `--baseline`, so adding a benchmark group no longer breaks every subsequent comparison
+- Pass 1 walks with `dua-core` across a work-stealing pool instead of one sequential `walkdir` traversal; the predicate still prunes VCS and target dirs, and entries are filtered in the consumer so work counters stay identical to before
+- `max_path_width` is cached on `AppState` and refreshed when the tree changes, rather than being rederived from every target on each frame
+- The interface adopts the terminal's own light/dark theme (ANSI colors, no forced black background) instead of a hardcoded dark look
+- The cursor row is highlighted with reverse video instead of an arrow glyph, so the cursor can no longer erase the selection color on a checked row
+- The delete chooser is a plain-language decision aid: "Preview only / Move to Trash / Delete permanently" with one-line consequences, clamped (non-wrapping) Up/Down navigation so `Up` from Preview can no longer land on the destructive option, and long selections truncate with an "… and N more" count instead of overflowing the dialog border
+- Header and states speak plainly: "X you can free · scanned in Ys", "measuring sizes n/m" while sizes stream in, "nothing found to clean" when the scan comes back empty, an explanatory scanning screen, and a guided empty state
+- `q`, `Esc`, and `Ctrl-C` quit immediately: nothing destructive happens on close, so the quit confirmation dialog was removed
+- Sort dialog relabeled "Order by" → "Sort by"; all existing keybindings preserved (`Space`, `a`, `d`, `o`, `Enter`, `?` is the only newly added key)
+- Sort options display their number (`1`–`6`), and pressing that digit in the dialog jumps straight to the option — Enter still applies
+- Project groups in the tree are no longer separated by a blank spacer row; color and bold alone mark the group boundaries, keeping the list one row tighter per group
+- Deletion runs on a background worker with the interface locked only for its duration — cursor movement (arrow keys, `Home`/`End`, paging, mouse wheel) stays live — and all modes vanish the armed rows from the list the moment the sweep starts: a real sweep brings back only failed deletes (checked, one Enter from a retry), while a preview puts every row back exactly as it was. The outcome is a plain header notice — `swept 3 · 1.2 GiB reclaimed`, red-highlighted when anything failed, `would sweep…` for previews — instead of a centered dialog
+- `Ctrl-C` during a sweep defers the quit until the sweep finishes (with an explanatory note in the errors area) instead of killing the worker mid-delete and leaving a half-swept tree behind
+- A panicked deletion worker finalizes the sweep as interrupted instead of wedging the interface in its locked phase: every not-yet-reported row returns checked, and the header shows a red `sweep interrupted · N restored`
+- Rows restored at the end of a sweep (failures, or everything in a preview) are re-sorted by the active sort order instead of tacked onto the end of their group
+- The cursor position in the action bar now counts sweepable directories only; it used to include project headers, so the first directory in a two-project scan read "3/4" instead of "1/2"
+- Last-child glyph (`├`/`└`) is derived during rendering from the tree's ordering instead of being stored as `is_last` on every entry, removing catch-up logic from three mutation paths (`build_tree`, `remove_deleted_from_tree`, `order_tree`)
+- `ui::render` takes `&AppState` instead of `&mut AppState` — rendering no longer mutates state
+
+### Performance
+- `pipeline/many-tiny` 34.76 ms → 9.43 ms (−72.9%, 3.7×), in two independent steps: `build_tree` 20.11 ms → 0.44 ms (−97.8%), then pass 1 across dua-core's pool 13.65 ms → 8.57 ms (−37%)
+- `pipeline/deep-nesting` 4.50 ms → 3.01 ms (−33.2%)
+- Size computation 3.4–6.0× faster depending on target count, measured within a single run against the sequential control
+- `render/many-tiny` 366.75 µs → 202.10 µs (−45%) and `render/deep-nesting` 259.25 µs → 221.40 µs (−14%), from caching the maximum path width instead of deriving it from the whole tree on every frame
+- Trade-off from the walker: spawning its pool costs a fixed ~350 µs, so small trees regress — `pipeline/dense-targets` 205 µs → 752 µs, `pipeline/node-monorepo` 804 µs → 1236 µs, `pipeline/multi-lang` 821 µs → 1213 µs. Break-even is roughly 50–80 directories and every regression stays sub-millisecond in absolute terms
+
+### Fixed
+- Order-by dialog: pressing Up on the last menu item wrapped two rows instead of one (`SizeDesc` mapped to `DateAsc` instead of `SizeAsc`)
+- Cursor landed on the project header after reordering the tree (reset `list_index` should skip the header, matching `build_tree`)
+- Event loop deadlock when confirming deletion with 0 items selected (`main.rs`)
+- Out-of-bounds index panic when navigating an empty tree after deleting all targets (`app.rs`)
+- Cursor reset to valid target dir when remaining items shift after deletion (`app.rs`)
+- Terminal state (raw mode, alternate screen, cursor) guaranteed restored on exit or panic via RAII guard (`main.rs`)
+- Reclaimed size calculation now strictly counts successful deletions, excluding failed targets (`main.rs`)
+- Recomputed `total_reclaimable` header metric after target dirs are removed from tree (`app.rs`)
+- Prevented spurious `ENOENT` read errors when background size walk races with active deletion (`main.rs`)
+- In-process pure Rust SHA-256 calculation for self-update, eliminating external `sha256sum`/PowerShell dependencies and fixing macOS updates (`commands.rs`)
+- Enforced mandatory checksum verification and added CRLF/asterisk support in checksum parser (`commands.rs`)
+- Enforced HTTPS protocol in npm installer, rejecting plaintext HTTP downloads and redirects (`npm/install.js`)
+- Hardened Windows PowerShell extraction parameters in npm installer to prevent argument injection (`npm/install.js`)
+- Disabled draft releases in GitHub Actions so release assets are immediately downloadable upon npm publish (`release.yml`)
+
 ## [0.3.0] - 2026-07-01
 
 ### Added

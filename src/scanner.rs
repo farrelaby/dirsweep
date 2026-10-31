@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
+use std::time::{Instant, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
 use walkdir::WalkDir;
@@ -9,6 +9,19 @@ use walkdir::WalkDir;
 use crate::config;
 
 const SKIP_DIRS: &[&str] = &[".git", ".svn", ".hg"];
+
+/// Whether pass 1 drops this entry entirely — neither counted nor descended into.
+///
+/// VCS names are skipped regardless of entry type because a git worktree has a `.git`
+/// *file*, not a directory. Target directories are skipped only as directories: a file
+/// that happens to be named `node_modules` is not one, and hiding it would be a bug.
+///
+/// Applied in two places on purpose. The walker's `descend` predicate is what refuses to
+/// traverse, but it runs on directories only and it still emits the entry; reapplying this
+/// in the consumer is what reproduces walkdir's `filter_entry`, which dropped the entry.
+fn is_pruned(name: &str, is_dir: bool) -> bool {
+    SKIP_DIRS.contains(&name) || (is_dir && config::is_any_target(name))
+}
 
 #[derive(Debug, Clone)]
 pub struct ScannedDir {
@@ -26,28 +39,77 @@ pub struct ProjectInfo {
     pub children: Vec<PathBuf>,
 }
 
-#[derive(Debug, Default)]
+/// Counters describing how much work a scan actually performed.
+///
+/// Wall-clock time on a loaded machine is noisy; the amount of work done is
+/// not. Comparing these across a rewrite tells you whether a speedup came
+/// from doing genuinely less work or from something incidental.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScanStats {
+    /// Directories entered during discovery (pass 1).
+    pub discovery_dirs: u64,
+    /// Files seen during discovery (pass 1).
+    pub discovery_files: u64,
+    /// Subtrees pruned by `filter_entry` (VCS dirs and already-known targets).
+    pub pruned_subtrees: u64,
+    /// Detection files matched (lock files, manifests, etc).
+    pub detection_hits: u64,
+    /// Directories opened while searching for targets (pass 2).
+    pub target_walk_dirs: u64,
+    /// Target directories ultimately claimed.
+    pub target_dirs_found: u64,
+    /// Wall time spent in pass 1 (the recursive discovery walk), microseconds.
+    ///
+    /// The three timings below bracket the work `scan` performs, so they
+    /// should sum to roughly `scan` itself. They exist to say *which* pass
+    /// dominates before choosing a parallelism strategy for it — a walker
+    /// only affects pass 1, and pass 2 is hand-rolled recursion.
+    pub pass1_us: u64,
+    /// Wall time turning detection hits into sorted projects, microseconds.
+    pub project_build_us: u64,
+    /// Wall time in pass 2 (target claiming), microseconds.
+    pub pass2_us: u64,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct ScanOutput {
     pub target_dirs: Vec<ScannedDir>,
     pub projects: Vec<ProjectInfo>,
     pub errors: Vec<String>,
+    pub stats: ScanStats,
 }
 
 pub fn scan(base_path: &Path) -> ScanOutput {
     let mut detection_files: HashMap<PathBuf, Vec<&str>> = HashMap::new();
     let mut errors: Vec<String> = Vec::new();
+    let mut stats = ScanStats::default();
+
+    let t0 = Instant::now();
 
     // Pass 1: Walk tree to find detection files.
-    // filter_entry skips entering known target dirs and VCS dirs entirely.
-    let walk = WalkDir::new(base_path)
-        .follow_links(false)
-        .into_iter()
-        .filter_entry(|e| {
-            let name = e.file_name().to_string_lossy();
-            !(SKIP_DIRS.contains(&name.as_ref())
-                || e.file_type().is_dir() && config::is_any_target(name.as_ref()))
-        });
+    //
+    // dua-core walks directory reads across a work-stealing pool instead of one thread.
+    // skip_metadata is not optional here: pass 1 only uses file_name, file_type and
+    // path().parent(), so collecting metadata would add a stat per entry that walkdir
+    // never made.
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    let walk = dua_core::walk(
+        base_path,
+        threads,
+        dua_core::Order::ParentFirst,
+        dua_core::Options::default().skip_metadata(),
+        |entry: &dua_core::Entry| {
+            !is_pruned(&entry.file_name.to_string_lossy(), entry.file_type.is_dir())
+        },
+    );
 
+    // dua yields a directory whose descend returned false, where walkdir's filter_entry
+    // dropped it entirely. Filtering here as well keeps discovery_dirs, discovery_files
+    // and pruned_subtrees exactly as they were, which is what makes the benchmark counter
+    // table comparable across the rewrite.
+    let mut pruned = 0u64;
     for entry in walk {
         let entry = match entry {
             Ok(e) => e,
@@ -57,12 +119,23 @@ pub fn scan(base_path: &Path) -> ScanOutput {
             }
         };
 
-        let file_name = entry.file_name().to_string_lossy().to_string();
+        let name = entry.file_name.to_string_lossy();
+        if is_pruned(&name, entry.file_type.is_dir()) {
+            pruned += 1;
+            continue;
+        }
 
-        if entry.file_type().is_file()
-            && let Some(lang) = config::is_detection_file(&file_name)
+        if entry.file_type.is_dir() {
+            stats.discovery_dirs += 1;
+        } else {
+            stats.discovery_files += 1;
+        }
+
+        if entry.file_type.is_file()
+            && let Some(lang) = config::is_detection_file(&name)
             && let Some(parent) = entry.path().parent()
         {
+            stats.detection_hits += 1;
             detection_files
                 .entry(parent.to_path_buf())
                 .or_default()
@@ -70,7 +143,11 @@ pub fn scan(base_path: &Path) -> ScanOutput {
         }
     }
 
+    stats.pruned_subtrees = pruned;
+    stats.pass1_us = t0.elapsed().as_micros() as u64;
+
     // Build projects
+    let t1 = Instant::now();
     let mut projects: Vec<ProjectInfo> = detection_files
         .into_iter()
         .map(|(path, languages)| {
@@ -94,6 +171,9 @@ pub fn scan(base_path: &Path) -> ScanOutput {
 
     // Sort projects deepest first for ancestor-based assignment
     projects.sort_by_key(|p| std::cmp::Reverse(p.path.components().count()));
+    stats.project_build_us = t1.elapsed().as_micros() as u64;
+
+    let t2 = Instant::now();
 
     // Pass 2: Find target dirs in each project's subtree.
     // Process deepest projects first so they claim their targets,
@@ -117,6 +197,7 @@ pub fn scan(base_path: &Path) -> ScanOutput {
                 false,
                 &mut found,
                 &mut errors,
+                &mut stats,
             );
         }
 
@@ -128,6 +209,7 @@ pub fn scan(base_path: &Path) -> ScanOutput {
                 true,
                 &mut found,
                 &mut errors,
+                &mut stats,
             );
         }
 
@@ -146,10 +228,14 @@ pub fn scan(base_path: &Path) -> ScanOutput {
         claimed_projects.insert(project.path.clone());
     }
 
+    stats.pass2_us = t2.elapsed().as_micros() as u64;
+    stats.target_dirs_found = target_dirs.len() as u64;
+
     ScanOutput {
         target_dirs,
         projects,
         errors,
+        stats,
     }
 }
 
@@ -163,7 +249,10 @@ fn find_target_dirs(
     recurse: bool,
     results: &mut Vec<PathBuf>,
     errors: &mut Vec<String>,
+    stats: &mut ScanStats,
 ) {
+    stats.target_walk_dirs += 1;
+
     let top_level = match fs::read_dir(dir) {
         Ok(rd) => rd,
         Err(e) => {
@@ -197,6 +286,7 @@ fn find_target_dirs(
                 recurse,
                 results,
                 errors,
+                stats,
             );
         }
     }
@@ -301,6 +391,72 @@ mod tests {
     }
 
     #[test]
+    fn test_scan_stats_counts_work() {
+        let dir = create_test_dir();
+        let project = dir.path().join("my-app");
+        create_file(&project.join("package-lock.json"), 50);
+        create_dir(&project.join("node_modules"));
+        create_file(&project.join("node_modules/pkg/index.js"), 1024);
+
+        let output = scan(dir.path());
+
+        assert_eq!(output.stats.detection_hits, 1);
+        assert_eq!(output.stats.target_dirs_found, 1);
+        // node_modules is pruned, so it is counted as pruned and never walked.
+        assert!(output.stats.pruned_subtrees >= 1);
+        // Root + my-app are entered; node_modules is not.
+        assert_eq!(output.stats.discovery_dirs, 2);
+        assert_eq!(output.stats.discovery_files, 1);
+    }
+
+    /// A git worktree has a `.git` *file*, not a directory.
+    ///
+    /// The walker's `descend` predicate only ever sees directories, so a `.git` file is
+    /// never offered to it and would otherwise be counted as discovered. walkdir's
+    /// `filter_entry` pruned it regardless of type; this pins the consumer filter that
+    /// restores that.
+    #[test]
+    fn test_scan_prunes_git_worktree_file() {
+        let dir = create_test_dir();
+        let project = dir.path().join("wt");
+        create_file(&project.join(".git"), 32);
+        create_file(&project.join("package.json"), 10);
+
+        let output = scan(dir.path());
+
+        assert_eq!(output.stats.discovery_dirs, 2, "root + wt");
+        assert_eq!(
+            output.stats.discovery_files, 1,
+            "package.json only — the .git file must be dropped, not discovered"
+        );
+        assert_eq!(output.stats.pruned_subtrees, 1);
+    }
+
+    #[test]
+    fn test_scan_phase_timings_cover_scan() {
+        let dir = create_test_dir();
+        let project = dir.path().join("my-app");
+        create_file(&project.join("package-lock.json"), 50);
+        create_dir(&project.join("node_modules"));
+        create_file(&project.join("node_modules/pkg/index.js"), 1024);
+
+        let t = Instant::now();
+        let output = scan(dir.path());
+        let total = t.elapsed().as_micros() as u64;
+
+        let s = output.stats;
+        let split = s.pass1_us + s.project_build_us + s.pass2_us;
+
+        // The three marks all sit inside `scan`, so together they cannot
+        // exceed it — a violation means the marks overlap and the reported
+        // split is meaningless. Slack covers coarse clock granularity.
+        assert!(
+            split <= total + 100,
+            "phase sum {split}us exceeds whole scan {total}us"
+        );
+    }
+
+    #[test]
     fn test_scan_detects_language() {
         let dir = create_test_dir();
         let project = dir.path().join("my-app");
@@ -368,6 +524,27 @@ mod tests {
 
         let (size, _) = scan_target_size(&target).unwrap();
         assert!(size >= 1024);
+    }
+
+    /// Hidden files inside a target dir must contribute to its size.
+    ///
+    /// Several parallel walkers (jwalk, dua's entry point) skip dotfiles by
+    /// default. That failure is silent — sizes come out low but plausible, and
+    /// the ordinary size test above still passes because it only checks a
+    /// visible file. This pins the behaviour before any walker swap.
+    #[test]
+    fn test_scan_target_size_counts_hidden_files() {
+        let dir = create_test_dir();
+        let target = dir.path().join("node_modules");
+        create_dir(&target);
+        create_file(&target.join("visible.js"), 1_000);
+        create_file(&target.join(".cache/hidden.bin"), 500);
+
+        let (size, _) = scan_target_size(&target).unwrap();
+        assert!(
+            size >= 1_500,
+            "hidden files must be counted, got {size} — walker is skipping dotfiles"
+        );
     }
 
     #[test]

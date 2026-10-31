@@ -72,18 +72,21 @@ dirsweep uninstall --force  # skip confirmation
 ## TUI preview
 
 ```
- dirsweep — /home/user/projects  |  6.8 GiB reclaimable  |  scan 0.6s
+ dirsweep — /home/user/projects  ·  6.8 GiB you can free  ·  scanned in 0.6s
 
    my-app (pnpm)
- ▶ └ [●] node_modules    1.2 GiB   3 days ago
+   └ [●] node_modules    1.2 GiB   3 days ago
      [●] dist            800 MiB   2 days ago
    rust-project (cargo)
    └ [●] target          4.5 GiB   10 days ago
    my-other-app (npm)
      [ ] .next           350 MiB   just now
 
- [Space] toggle  [a] all  [d] none  [Enter] delete  [q] quit  3 selected | 6.50 GiB | 1/6
+ [Space] Toggle  [a] All  [d] None  [o] Sort  [?] Help  [Enter] Delete (3 · 6.50 GiB)  [q] Quit   1/4
 ```
+
+Everything on the bar is clickable — and so are the rows and the dialog
+options. Press `?` in the app to see every key at once.
 
 ## Supported targets
 
@@ -180,3 +183,75 @@ DIRSWEEP=target/debug/dirsweep RUNS=5 SCENARIOS="1 3" bash bench/bench.sh
 
 Fixtures are created in `bench/fixtures/` and left after the run for inspection.
 Remove them with `rm -rf bench/fixtures`.
+
+### Benchmarking the core
+
+`bench.sh` measures dirsweep end-to-end against npkill — one wall-clock number.
+That answers "is dirsweep fast?", but not "which phase got slower?". For
+algorithmic changes to the scan core there is a separate Criterion harness that
+times each phase in isolation, plus size computation, which `bench.sh` never
+measures because the TUI discards it before it finishes.
+
+```bash
+# Build without running (used in CI to stop benches rotting):
+cargo bench --bench scan --no-run
+
+# Run everything:
+cargo bench --bench scan
+
+# One phase, one scenario:
+cargo bench --bench scan -- "scan/many-tiny"
+```
+
+Five groups, each over five deterministic scenarios:
+
+| Group | Measures |
+|---|---|
+| `pipeline/` | `scan` → `build_tree` → first rendered frame. The headline number |
+| `scan/` | `scanner::scan` alone — discovery and target assignment |
+| `build_tree/` | `AppState::build_tree` — flattening scan output into the render tree |
+| `size/` | `scan_target_size` across every target, replicating the worker in `main.rs` |
+| `render/` | `ui::render` into a fixed 120x40 `TestBackend`, tree pre-built |
+
+Scenarios: `node-monorepo`, `multi-lang`, `many-tiny` (500 projects),
+`deep-nesting`, `dense-targets` (few targets, many files — the one that
+stresses `size/`).
+
+Unlike `bench.sh`, fixtures are **deterministic**: a seeded PRNG replaces
+`$RANDOM`, so the same scenario always produces the same tree. That is what
+makes a before/after comparison meaningful rather than partly noise.
+
+Before starting a rewrite, save a baseline; afterwards, compare against it:
+
+```bash
+git checkout main      && cargo bench --bench scan -- --save-baseline before
+git checkout <rewrite> && cargo bench --bench scan -- --baseline before
+```
+
+Run the two back to back. The same code measured **1.87× apart** across two
+sessions on this laptop — a uniform shift from CPU clock and thermal state, not
+an algorithmic change. A stale baseline will report a false speedup in every
+benchmark. `bench/BASELINE.md` has the measurements and the full procedure.
+
+Criterion reports a significance test per benchmark (regressed / improved /
+no change) rather than a bare percentage. HTML reports land in
+`target/criterion/`.
+
+Each run also prints a **work counters** table — directories entered, files
+seen, subtrees pruned, detection files matched:
+
+```
+scenario          targets    files   disc_d   disc_f   pruned   detect    tgt_d
+many-tiny             500     1500      501      500      500      500      500
+dense-targets           3      753        4        3        3        3        3
+```
+
+Wall-clock time on a loaded machine is noisy; work done is not. If a rewrite
+cuts `disc_d` by a third, that is a real result even when the timer cannot
+resolve it. Note `dense-targets`: 753 files exist but discovery only enters
+three, because `node_modules` is pruned rather than walked.
+
+Benches build under `[profile.bench]` with `opt-level = 3`, while the shipped
+binary is `opt-level = "z"`. Both sides of a comparison use the bench profile,
+so the result isolates algorithmic change from optimizer behaviour — but it is
+not a measurement of the binary you ship.
